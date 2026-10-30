@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Base desktop window capabilities; AI operations are explicitly exposed as narrow Rust commands.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
