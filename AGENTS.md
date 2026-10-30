@@ -39,3 +39,10 @@ If documents conflict or a product decision is missing, explain the conflict and
 - Errors, timeouts, cancellation, and permissions handled.
 - UI and README describe actual support accurately.
 - No sensitive data or unapproved cloud dependencies are introduced.
+
+## Current repository state (2026-10-30)
+- `src/`: React UI and typed services. Home/Projects and text-chat UX are implemented in source; the Teach, Skill, Live Screen and Run surfaces are **disabled placeholders**.
+- `src-tauri/`: Tauri 2 Rust shell with only `ai_status` and `ai_chat` commands reaching fixed localhost LM Studio. No arbitrary OS control exists.
+- `docs/GETTING_STARTED.md`, `docs/ARCHITECTURE.md`, `docs/IMPLEMENTATION_STATUS.md` explain how to build, what is not tested, and what remains.
+- First agent priority: run `npm install`, `npm run check`, `npm run dev` on Windows; confirm local LM Studio; record issues before implementing capture/automation.
+- Change the stack when verified technical constraints justify it. Preserve product boundaries, API isolation, privacy, and truthful UI states.
