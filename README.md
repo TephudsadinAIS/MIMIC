@@ -1,4 +1,3 @@
-[Uploading README.md…]()
 <div align="center">
 
 # ✨ MIMIC
@@ -22,6 +21,27 @@
 
 > [!IMPORTANT]
 > **MIMIC ยังอยู่ในขั้นออกแบบ (Concept / Planning)** — README นี้อธิบาย **วิสัยทัศน์และฟีเจอร์ที่วางแผนจะสร้าง** ไม่ได้หมายความว่าความสามารถดังกล่าวพัฒนาเสร็จหรือใช้งานได้แล้ว
+
+## 🛠️ Current codebase — v0.1 UI Scaffold
+
+> The repository now includes an **early desktop application source scaffold**, not a completed autonomous assistant. It has **not yet been verified on the target Windows computer**.
+
+- **Desktop shell:** Tauri 2 + React + TypeScript + Vite (provisional; may be changed following Phase 0)
+- **Available UI:** Home, Project creation/selection, Workspace, Skills/Teach placeholders, Settings
+- **Local AI bridge:** narrow Rust commands for LM Studio model detection and text chat at `127.0.0.1:1234`
+- **Not implemented:** screen capture, computer control, teaching/recording, skill replay, voice, or game automation
+- **Safety:** automation buttons remain disabled until genuinely implemented and verified
+
+**Getting started:** [Windows setup & run instructions](docs/GETTING_STARTED.md) · [Architecture](docs/ARCHITECTURE.md) · [Implementation status](docs/IMPLEMENTATION_STATUS.md)
+
+```powershell
+npm install
+npm run dev
+```
+
+> Requires Node.js, Rust and Windows native build tools. LM Studio must be running with a model to use text chat.
+
+---
 
 ## 🧠 MIMIC คืออะไร
 
