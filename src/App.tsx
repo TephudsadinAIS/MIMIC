@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import {
   Activity, ArrowRight, BookOpen, Bot, Check, ChevronRight, CircleHelp,
-  Cpu, Database, Eye, FolderOpen, HardDrive, Home, LockKeyhole, MessageSquare,
+  Cpu, Database, Eye, FolderOpen, Home, LockKeyhole,
   Mic, Monitor, MoreHorizontal, Pause, Play, Plus, RefreshCw, Send,
   Settings2, ShieldCheck, Sparkles, Square, Video, WandSparkles, X,
 } from 'lucide-react';
