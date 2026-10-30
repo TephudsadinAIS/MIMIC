@@ -1,0 +1,80 @@
+# MIMIC: public repository; local/private runtime data MUST stay outside Git.
+
+# Secrets and environment
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.secret
+secrets/
+credentials/
+private/
+
+# Local user information / memory / demonstrations / recordings
+data/
+local-data/
+user-data/
+runtime-data/
+recordings/
+screenshots/
+captures/
+sessions/
+memory/
+models/
+checkpoints/
+weights/
+*.gguf
+*.safetensors
+*.onnx
+*.pt
+*.pth
+*.ckpt
+*.sqlite
+*.sqlite3
+*.db
+*.db-shm
+*.db-wal
+*.log
+
+# JavaScript / TypeScript
+node_modules/
+.pnpm-store/
+dist/
+build/
+out/
+coverage/
+.svelte-kit/
+.next/
+.turbo/
+.vite/
+*.tsbuildinfo
+
+# Tauri / Rust (if selected later)
+target/
+src-tauri/target/
+
+# Python (if selected later)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local IDE / OS
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.example.json
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
