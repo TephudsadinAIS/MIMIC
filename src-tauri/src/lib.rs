@@ -127,6 +127,11 @@ fn automation_advance_demo(
 }
 
 #[tauri::command]
+fn automation_observe_demo(target_window_id: isize) -> Result<automation::DemoObservation, String> {
+    automation::observe_demo(target_window_id)
+}
+
+#[tauri::command]
 fn automation_emergency_stop() -> automation::DemoRunResult {
     automation::emergency_stop()
 }
@@ -140,6 +145,7 @@ pub fn run() {
             automation_list_windows,
             automation_start_demo,
             automation_advance_demo,
+            automation_observe_demo,
             automation_emergency_stop,
         ])
         .run(tauri::generate_context!())

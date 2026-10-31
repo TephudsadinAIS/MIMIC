@@ -5,6 +5,34 @@ export interface Project {
   name: string;
   description: string;
   createdAt: string;
+  workflow: Workflow;
+}
+
+export type DemoState = 'login' | 'server' | 'ready';
+export type WorkflowStepKind = 'wait-for-state' | 'advance';
+
+export interface WorkflowStep {
+  id: string;
+  title: string;
+  kind: WorkflowStepKind;
+  expectedState: DemoState;
+  timeoutMs: number;
+  maxAttempts: number;
+}
+
+export interface Workflow {
+  schemaVersion: 1;
+  id: string;
+  name: string;
+  steps: WorkflowStep[];
+}
+
+export type WorkflowRunPhase = 'idle' | 'running' | 'paused' | 'completed' | 'failed' | 'stopped';
+
+export interface WorkflowRunEvent {
+  stepId: string;
+  message: string;
+  at: string;
 }
 
 export interface AiStatus {
@@ -28,6 +56,12 @@ export interface TargetWindow {
 export interface AutomationRunResult {
   status: 'verified' | 'completed' | 'stopped';
   message: string;
+  targetWindowId: number;
+}
+
+export interface DemoObservation {
+  state: DemoState;
+  title: string;
   targetWindowId: number;
 }
 

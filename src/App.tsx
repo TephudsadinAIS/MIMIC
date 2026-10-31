@@ -1,14 +1,14 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import {
   Activity, ArrowRight, BookOpen, Bot, Check, ChevronRight, CircleHelp,
   Cpu, Database, Eye, FolderOpen, Home, LockKeyhole,
   Mic, Monitor, Play, Plus, RefreshCw, Send,
   Settings2, ShieldCheck, Sparkles, Square, Video, WandSparkles, X,
 } from 'lucide-react';
-import type { AiStatus, AutomationRunResult, ChatMessage, ConnectionState, Project, TargetWindow, View } from './types';
-import { advanceDemoTarget, listTargetWindows, requestEmergencyStop, startDemoTarget } from './services/automation';
+import type { AiStatus, ChatMessage, ConnectionState, Project, TargetWindow, View, WorkflowRunEvent, WorkflowRunPhase, WorkflowStep } from './types';
+import { advanceDemoTarget, listTargetWindows, observeDemoTarget, requestEmergencyStop, startDemoTarget } from './services/automation';
 import { chatWithLocalAi, checkLocalAi, isDesktop } from './services/localAi';
-import { loadProjects, saveProjects } from './services/projectStore';
+import { createDemoWorkflow, loadProjects, saveProjects } from './services/projectStore';
 
 const newId = () => crypto.randomUUID();
 
@@ -62,7 +62,10 @@ export default function App() {
   const [permissionGranted, setPermissionGranted] = useState(false);
   const [automationBusy, setAutomationBusy] = useState(false);
   const [automationMessage, setAutomationMessage] = useState('เริ่ม Demo Target แล้วเลือกหน้าต่างที่แสดงในรายการ');
-  const [automationResult, setAutomationResult] = useState<AutomationRunResult | null>(null);
+  const [runPhase, setRunPhase] = useState<WorkflowRunPhase>('idle');
+  const [runStepId, setRunStepId] = useState<string | null>(null);
+  const [runEvents, setRunEvents] = useState<WorkflowRunEvent[]>([]);
+  const runControl = useRef({ stopped: false, paused: false });
 
   const project = projects.find((item) => item.id === selectedId) ?? null;
   const selectedModels: string[] = connection.phase === 'ready' ? connection.status.models : [];
@@ -100,7 +103,6 @@ export default function App() {
 
   async function launchDemo() {
     setAutomationBusy(true);
-    setAutomationResult(null);
     try {
       await startDemoTarget();
       await refreshWindows();
@@ -112,30 +114,114 @@ export default function App() {
     }
   }
 
-  async function advanceDemo() {
-    if (targetWindowId === null || !permissionGranted) return;
-    setAutomationBusy(true);
-    setAutomationResult(null);
+  async function emergencyStop() {
+    runControl.current.stopped = true;
+    runControl.current.paused = false;
+    setRunPhase('stopped');
     try {
-      const result = await advanceDemoTarget(targetWindowId, permissionGranted);
-      setAutomationResult(result);
+      const result = await requestEmergencyStop();
       setAutomationMessage(result.message);
-      await refreshWindows();
     } catch (error) {
       setAutomationMessage(String(error));
-    } finally {
-      setAutomationBusy(false);
     }
   }
 
-  async function emergencyStop() {
-    try {
-      const result = await requestEmergencyStop();
-      setAutomationResult(result);
-      setAutomationMessage(result.message);
-    } catch (error) {
-      setAutomationMessage(String(error));
+  function updateWorkflowStep(stepId: string, update: Partial<WorkflowStep>) {
+    if (!project) return;
+    setProjects((current) => current.map((item) => item.id !== project.id ? item : {
+      ...item,
+      workflow: { ...item.workflow, steps: item.workflow.steps.map((step) => step.id === stepId ? { ...step, ...update } : step) },
+    }));
+  }
+
+  function addWorkflowStep() {
+    if (!project) return;
+    const step: WorkflowStep = { id: newId(), title: 'Wait for Login', kind: 'wait-for-state', expectedState: 'login', timeoutMs: 10_000, maxAttempts: 1 };
+    setProjects((current) => current.map((item) => item.id !== project.id ? item : { ...item, workflow: { ...item.workflow, steps: [...item.workflow.steps, step] } }));
+  }
+
+  function removeWorkflowStep(stepId: string) {
+    if (!project || project.workflow.steps.length <= 1) return;
+    setProjects((current) => current.map((item) => item.id !== project.id ? item : { ...item, workflow: { ...item.workflow, steps: item.workflow.steps.filter((step) => step.id !== stepId) } }));
+  }
+
+  function moveWorkflowStep(stepId: string, direction: -1 | 1) {
+    if (!project) return;
+    const index = project.workflow.steps.findIndex((step) => step.id === stepId);
+    const nextIndex = index + direction;
+    if (index < 0 || nextIndex < 0 || nextIndex >= project.workflow.steps.length) return;
+    const steps = [...project.workflow.steps];
+    [steps[index], steps[nextIndex]] = [steps[nextIndex], steps[index]];
+    setProjects((current) => current.map((item) => item.id !== project.id ? item : { ...item, workflow: { ...item.workflow, steps } }));
+  }
+
+  function addRunEvent(stepId: string, message: string) {
+    setRunEvents((current) => [...current, { stepId, message, at: new Date().toLocaleTimeString() }].slice(-30));
+  }
+
+  async function waitForResume(): Promise<boolean> {
+    while (runControl.current.paused && !runControl.current.stopped) {
+      await new Promise((resolve) => window.setTimeout(resolve, 100));
     }
+    return !runControl.current.stopped;
+  }
+
+  async function runWorkflow() {
+    if (!project || targetWindowId === null || !permissionGranted || automationBusy) return;
+    runControl.current = { stopped: false, paused: false };
+    setAutomationBusy(true); setRunPhase('running'); setRunEvents([]);
+    try {
+      for (const step of project.workflow.steps) {
+        setRunStepId(step.id);
+        if (!await waitForResume()) throw new Error('Workflow stopped by user');
+        let lastError = 'No matching state';
+        let succeeded = false;
+        for (let attempt = 1; attempt <= Math.max(1, step.maxAttempts); attempt += 1) {
+          if (!await waitForResume()) throw new Error('Workflow stopped by user');
+          try {
+            if (step.kind === 'wait-for-state') {
+              const deadline = Date.now() + Math.max(1000, Math.floor(step.timeoutMs / Math.max(1, step.maxAttempts)));
+              while (Date.now() < deadline) {
+                if (!await waitForResume()) throw new Error('Workflow stopped by user');
+                const observed = await observeDemoTarget(targetWindowId);
+                if (observed.state === step.expectedState) {
+                  addRunEvent(step.id, `${step.title}: verified ${observed.state}`);
+                  succeeded = true;
+                  break;
+                }
+                lastError = `Expected ${step.expectedState}; observed ${observed.state}`;
+                await new Promise((resolve) => window.setTimeout(resolve, 250));
+              }
+              if (!succeeded) throw new Error(lastError);
+            } else {
+              const result = await advanceDemoTarget(targetWindowId, true);
+              if (result.status === 'stopped') throw new Error(result.message);
+              const observed = await observeDemoTarget(targetWindowId);
+              if (observed.state !== step.expectedState) throw new Error(`Expected ${step.expectedState}; observed ${observed.state}`);
+              addRunEvent(step.id, `${step.title}: ${result.message}`);
+            }
+            succeeded = true;
+            break;
+          } catch (error) {
+            lastError = String(error);
+            addRunEvent(step.id, `Attempt ${attempt} failed: ${lastError}`);
+          }
+        }
+        if (!succeeded) throw new Error(`${step.title} failed: ${lastError}`);
+      }
+      setRunPhase('completed'); setAutomationMessage('Workflow completed with every expected state verified.');
+    } catch (error) {
+      const stopped = runControl.current.stopped;
+      setRunPhase(stopped ? 'stopped' : 'failed');
+      setAutomationMessage(String(error));
+    } finally {
+      setRunStepId(null); setAutomationBusy(false);
+    }
+  }
+
+  function pauseOrResumeWorkflow() {
+    if (runPhase === 'running') { runControl.current.paused = true; setRunPhase('paused'); }
+    else if (runPhase === 'paused') { runControl.current.paused = false; setRunPhase('running'); }
   }
 
   function openProject(nextId: string) {
@@ -154,6 +240,7 @@ export default function App() {
       name: name.slice(0, 60),
       description: projectDescription.trim().slice(0, 200),
       createdAt: new Date().toISOString(),
+      workflow: createDemoWorkflow(newId()),
     };
     setProjects((current) => [next, ...current]);
     setProjectName('');
@@ -303,21 +390,23 @@ export default function App() {
         </>}
 
         {view === 'workspace' && (project ? <>
-          <div className="workspace-title"><div><span className="section-eyebrow">PROJECT WORKSPACE</span><h1>{project.name}</h1><p>{project.description || 'แยกการสนทนาและทักษะตามโปรเจกต์'}</p></div><span className="chip subtle">Project metadata only</span></div>
+          <div className="workspace-title"><div><span className="section-eyebrow">PROJECT WORKSPACE</span><h1>{project.name}</h1><p>{project.description || 'กำหนด workflow ที่ตรวจสอบผลก่อนทำขั้นถัดไป'}</p></div><span className="chip subtle">Workflow saved locally</span></div>
           <div className="workspace-toolbar">
             <button type="button" className="toolbar-primary" onClick={() => void launchDemo()} disabled={automationBusy}><Monitor size={17} /> Start Demo Target</button>
             <button type="button" onClick={() => void refreshWindows()} disabled={automationBusy}><RefreshCw size={16} /> Refresh windows</button>
-            <button type="button" onClick={() => void advanceDemo()} disabled={automationBusy || targetWindowId === null || !permissionGranted}><Play size={16} /> Verify & Advance</button>
+            <button type="button" onClick={() => void runWorkflow()} disabled={automationBusy || targetWindowId === null || !permissionGranted}><Play size={16} /> Run workflow</button>
+            <button type="button" onClick={pauseOrResumeWorkflow} disabled={runPhase !== 'running' && runPhase !== 'paused'}>{runPhase === 'paused' ? 'Resume' : 'Pause'}</button>
             <button type="button" className="emergency-button" onClick={() => void emergencyStop()}><Square size={15} /> Emergency Stop</button>
             <span className="toolbar-note"><LockKeyhole size={15} /> Demo only · no AI · no global mouse input</span>
           </div>
           <div className="workspace-grid">
-            <section className="panel skill-panel"><div className="panel-heading"><div><span className="section-eyebrow">WINDOW SCOPE</span><h3><WandSparkles size={18} /> Target permission</h3></div><ShieldCheck size={18} /></div>
-              <div className="target-picker"><p>เลือกหน้าต่างด้วยตัวเองก่อน MIMIC จะส่งคำสั่งใด ๆ</p><select aria-label="Target window" value={targetWindowId ?? ''} onChange={(event) => setTargetWindowId(event.target.value ? Number(event.target.value) : null)}><option value="">Select a window…</option>{targetWindows.map((window) => <option key={window.id} value={window.id}>{window.isDemo ? 'Demo · ' : ''}{window.title} (PID {window.processId})</option>)}</select><label className="permission-check"><input type="checkbox" checked={permissionGranted} onChange={(event) => setPermissionGranted(event.target.checked)} /> I allow this Demo Window for this run</label><span className="chip subtle">Only known Demo states can advance</span></div>
+            <section className="panel skill-panel workflow-panel"><div className="panel-heading"><div><span className="section-eyebrow">WORKFLOW BUILDER</span><h3><WandSparkles size={18} /> {project.workflow.name}</h3></div><button className="text-button" type="button" onClick={addWorkflowStep}>+ Add step</button></div>
+              <div className="workflow-steps">{project.workflow.steps.map((step, index) => <div className={'workflow-step ' + (step.id === runStepId ? 'active' : '')} key={step.id}><strong>{index + 1}</strong><div><input aria-label={`Step ${index + 1} title`} value={step.title} maxLength={60} onChange={(event) => updateWorkflowStep(step.id, { title: event.target.value })}/><select aria-label={`Step ${index + 1} action`} value={step.kind} onChange={(event) => updateWorkflowStep(step.id, { kind: event.target.value as WorkflowStep['kind'] })}><option value="wait-for-state">Wait for state</option><option value="advance">Verify & advance</option></select><select aria-label={`Step ${index + 1} expected state`} value={step.expectedState} onChange={(event) => updateWorkflowStep(step.id, { expectedState: event.target.value as WorkflowStep['expectedState'] })}><option value="login">Login</option><option value="server">Server</option><option value="ready">Ready</option></select><span className="step-settings"><label>Timeout ms<input type="number" min="1000" max="60000" value={step.timeoutMs} onChange={(event) => updateWorkflowStep(step.id, { timeoutMs: Math.max(1000, Number(event.target.value) || 1000) })}/></label><label>Retries<input type="number" min="1" max="5" value={step.maxAttempts} onChange={(event) => updateWorkflowStep(step.id, { maxAttempts: Math.max(1, Math.min(5, Number(event.target.value) || 1)) })}/></label></span></div><div className="step-actions"><button type="button" onClick={() => moveWorkflowStep(step.id, -1)} disabled={index === 0}>↑</button><button type="button" onClick={() => moveWorkflowStep(step.id, 1)} disabled={index === project.workflow.steps.length - 1}>↓</button><button type="button" onClick={() => removeWorkflowStep(step.id)} disabled={project.workflow.steps.length <= 1}>×</button></div></div>)}</div>
+              <div className="target-picker"><p>เลือกหน้าต่าง Demo แล้วอนุญาตก่อน Run. ขั้นตอนด้านบนจะถูกบันทึกไว้ในเครื่องอัตโนมัติ แต่ยังใช้ได้กับ Controlled Demo เท่านั้น</p><select aria-label="Target window" value={targetWindowId ?? ''} onChange={(event) => setTargetWindowId(event.target.value ? Number(event.target.value) : null)}><option value="">Select a window…</option>{targetWindows.filter((window) => window.isDemo).map((window) => <option key={window.id} value={window.id}>Demo · {window.title} (PID {window.processId})</option>)}</select><label className="permission-check"><input type="checkbox" checked={permissionGranted} onChange={(event) => setPermissionGranted(event.target.checked)} /> I allow this Demo Window for this run</label></div>
             </section>
-            <section className="panel screen-panel"><div className="panel-heading"><div><span className="section-eyebrow">OBSERVE → ACT → VERIFY</span><h3><Monitor size={18} /> Automation monitor</h3></div><span className={'chip ' + (automationResult?.status === 'completed' ? '' : 'subtle')}>{automationResult?.status ?? 'Idle'}</span></div>
-              <div className="screen-placeholder"><div className="screen-art"><Monitor size={51} strokeWidth={1.25} /><span className="screen-glint" /></div><h3>{automationResult?.status === 'completed' ? 'Demo is Ready' : 'Controlled Demo only'}</h3><p>{automationMessage}</p><div className="demo-flow"><span>Login</span><ArrowRight size={14} /><span>Server</span><ArrowRight size={14} /><span>Ready</span></div></div>
-              <div className="screen-status"><span><span className="status-dot" /> {targetWindowId ? 'Target selected' : 'No target selected'}</span><span><LockKeyhole size={14} /> No screenshots stored</span></div>
+            <section className="panel screen-panel"><div className="panel-heading"><div><span className="section-eyebrow">OBSERVE → ACT → VERIFY</span><h3><Monitor size={18} /> Automation monitor</h3></div><span className={'chip ' + (runPhase === 'completed' ? '' : 'subtle')}>{runPhase}</span></div>
+              <div className="screen-placeholder"><div className="screen-art"><Monitor size={51} strokeWidth={1.25} /><span className="screen-glint" /></div><h3>{runPhase === 'completed' ? 'Workflow completed' : 'Controlled Demo only'}</h3><p>{automationMessage}</p><div className="demo-flow"><span>Login</span><ArrowRight size={14} /><span>Server</span><ArrowRight size={14} /><span>Ready</span></div><div className="run-log" aria-live="polite">{runEvents.length ? runEvents.map((event, index) => <p key={`${event.at}-${index}`}><time>{event.at}</time> {event.message}</p>) : <p>No run events yet.</p>}</div></div>
+              <div className="screen-status"><span><span className="status-dot" /> {runPhase}{targetWindowId ? ' · target selected' : ''}</span><span><LockKeyhole size={14} /> No screenshots stored</span></div>
             </section>
             {renderChat()}
           </div>

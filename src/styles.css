@@ -117,6 +117,22 @@ h1, h2, h3, p { overflow-wrap:anywhere; }
 .target-picker select { width:100%; color:#dbeafa; background:#0c192c; border:1px solid #3a5270; border-radius:9px; padding:10px; font-size:11px; }
 .permission-check { display:flex; align-items:flex-start; gap:9px; color:#c9d8ea; font-size:11px; line-height:1.5; }
 .permission-check input { margin:2px 0 0; accent-color:#2e8bf5; }
+.workflow-panel { min-width:320px; }
+.workflow-panel .panel-heading { min-height:76px; }
+.workflow-steps { display:grid; gap:8px; padding:12px; max-height:365px; overflow:auto; }
+.workflow-step { display:grid; grid-template-columns:25px minmax(0,1fr) auto; gap:8px; align-items:start; padding:9px; background:#0d1a2c; border:1px solid #293d58; border-radius:9px; }
+.workflow-step.active { border-color:#4a9bf0; box-shadow:0 0 0 1px #4a9bf044; }
+.workflow-step > strong { display:grid; place-items:center; width:22px; height:22px; border-radius:50%; background:#264c78; color:#cfe6ff; font-size:10px; }
+.workflow-step > div:nth-child(2) { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+.workflow-step input, .workflow-step select { width:100%; min-width:0; padding:6px; background:#101e32; border:1px solid #35516f; border-radius:6px; color:#dcecff; font-size:10px; }
+.workflow-step > div:nth-child(2) > input { grid-column:1/-1; }
+.step-settings { grid-column:1/-1; display:flex; gap:7px; }
+.step-settings label { flex:1; display:grid; grid-template-columns:auto 1fr; align-items:center; gap:5px; color:#7694b7; font-size:9px; }
+.step-actions { display:flex; gap:3px; }
+.step-actions button { width:23px; height:23px; padding:0; border:1px solid #344b67; border-radius:5px; color:#b9d4ef; background:#172942; }
+.run-log { width:100%; max-width:390px; max-height:130px; overflow:auto; text-align:left; border-top:1px solid #2a405b; padding-top:8px; }
+.run-log p { margin:0 0 5px; max-width:none; font-size:10px; line-height:1.45; color:#a7c1dc; }
+.run-log time { color:#6d9dca; margin-right:4px; }
 .demo-flow { display:flex; align-items:center; justify-content:center; gap:9px; color:#79baff; font-size:11px; font-weight:700; }
 .empty-feature { min-height:245px; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; gap:12px; padding:22px; }
 .empty-feature-icon { display:grid; place-items:center; width:64px; height:64px; border-radius:18px; background:#192d48; color:#599ce7; }

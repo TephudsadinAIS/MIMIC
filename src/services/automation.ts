@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { AutomationRunResult, TargetWindow } from '../types';
+import type { AutomationRunResult, DemoObservation, TargetWindow } from '../types';
 import { isDesktop } from './localAi';
 
 function requireDesktop(): void {
@@ -19,6 +19,11 @@ export async function startDemoTarget(): Promise<void> {
 export async function advanceDemoTarget(targetWindowId: number, permissionGranted: boolean): Promise<AutomationRunResult> {
   requireDesktop();
   return invoke<AutomationRunResult>('automation_advance_demo', { targetWindowId, permissionGranted });
+}
+
+export async function observeDemoTarget(targetWindowId: number): Promise<DemoObservation> {
+  requireDesktop();
+  return invoke<DemoObservation>('automation_observe_demo', { targetWindowId });
 }
 
 export async function requestEmergencyStop(): Promise<AutomationRunResult> {

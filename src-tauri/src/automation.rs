@@ -60,6 +60,14 @@ pub struct DemoRunResult {
     pub target_window_id: isize,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DemoObservation {
+    pub state: String,
+    pub title: String,
+    pub target_window_id: isize,
+}
+
 fn to_wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(Some(0)).collect()
 }
@@ -256,6 +264,35 @@ fn expected_transition_for(title: &str) -> Option<(&'static str, &'static str)> 
     }
 }
 
+fn state_for_title(title: &str) -> Option<&'static str> {
+    match title {
+        DEMO_LOGIN => Some("login"),
+        DEMO_SERVER => Some("server"),
+        DEMO_READY => Some("ready"),
+        _ => None,
+    }
+}
+
+pub fn observe_demo(target_window_id: isize) -> Result<DemoObservation, String> {
+    let window = HWND(target_window_id as *mut _);
+    unsafe {
+        if !IsWindow(Some(window)).as_bool() || !IsWindowVisible(window).as_bool() {
+            return Err("Selected target is no longer an open visible window".into());
+        }
+        if class_of(window) != "MimicAutomationDemoTarget" {
+            return Err("Selected target is not the controlled MIMIC Demo window".into());
+        }
+        let title = title_of(window);
+        let state = state_for_title(&title)
+            .ok_or_else(|| "Demo window is in an unexpected state".to_string())?;
+        Ok(DemoObservation {
+            state: state.into(),
+            title,
+            target_window_id,
+        })
+    }
+}
+
 pub fn advance_demo(
     target_window_id: isize,
     permission_granted: bool,
@@ -353,6 +390,12 @@ mod tests {
             .into_iter()
             .find(|window| window.is_demo && window.title == DEMO_LOGIN)
             .expect("demo login window should be discoverable");
+        assert_eq!(
+            observe_demo(demo.id)
+                .expect("demo should be observable")
+                .state,
+            "login"
+        );
 
         let first = advance_demo(demo.id, true).expect("login action should verify server state");
         assert_eq!(first.status, "verified");
