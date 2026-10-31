@@ -11,7 +11,7 @@
 
 ## Suggested TypeScript model (not implemented)
 
-\`\`\`ts
+```ts
 type Locator =
   | { kind: 'uia'; automationId?: string; name?: string; controlType?: string }
   | { kind: 'template'; assetId: string; region?: [number, number, number, number]; threshold: number }
@@ -47,23 +47,23 @@ type Workflow = {
   name: string;
   steps: Step[];
 };
-\`\`\`
+```
 
 These are *illustrative types*, not a claim that selectors/visual locators work in a protected game. Strengthen the schema with runtime validation, per-action permission checks, bounded waits, a cancellation token, and window identity checks before implementing actual automation. Avoid using raw global process IDs as permanent identifiers; process IDs change.
 
 ## Minimal controlled demo
 
-1. \`launch-app\` a sample demo window selected by user.
-2. \`wait-for\` its "Login" view.
-3. \`click\` a visible labeled control.
-4. \`wait-for\` expected "Server selection" view.
-5. \`click\` an allowed demo control.
+1. `launch-app` a sample demo window selected by user.
+2. `wait-for` its "Login" view.
+3. `click` a visible labeled control.
+4. `wait-for` expected "Server selection" view.
+5. `click` an allowed demo control.
 6. Verify "Ready" view.
 
 Use synthetic data; do not store a real account in the demo. The order is merely an example; allow steps to be added/reordered instead of hardcoding state names.
 
 ## Engine result states
-\`idle → preflight → running → waiting → verified → completed\` with transitions to \`paused\`, \`needs-attention\`, \`failed\`, \`stopped\`. Include \`stepIndex\`, \`attempt\`, \`targetWindowId\`, timestamp, and sanitized human-readable explanation in run events.
+`idle → preflight → running → waiting → verified → completed` with transitions to `paused`, `needs-attention`, `failed`, `stopped`. Include `stepIndex`, `attempt`, `targetWindowId`, timestamp, and sanitized human-readable explanation in run events.
 
 ## Storage rules
 - Workflow/project metadata goes to application-local storage or SQLite (preferred before production); migration/versioning required.
