@@ -331,15 +331,26 @@ export default function App() {
   }
 
   async function handleTestSingleStep(stepToTest: WorkflowStep) {
-    if (!targetWindowId) {
+    const isLaunch = stepToTest.actionType === 'launch-app' || stepToTest.kind === 'launch-app';
+    if (!targetWindowId && !isLaunch) {
       setStepTestFeedback({ message: 'กรุณาเลือก Target Window ก่อนทดสอบ', success: false });
+      return;
+    }
+    if (stepToTest.actionType === 'type-secret' || stepToTest.kind === 'type-secret') {
+      setStepTestFeedback({
+        message: 'Type Secret ถูกปิดการใช้งานเพื่อความปลอดภัย (รอเชื่อมต่อ Windows Credential Manager ใน Phase 2)',
+        success: false,
+      });
       return;
     }
     setAutomationBusy(true);
     setStepTestFeedback(null);
     try {
       await resetEmergencyStop();
-      const result: StepExecutionResult = await executeStep(targetWindowId, stepToTest);
+      const result: StepExecutionResult = await executeStep(targetWindowId ?? 0, stepToTest, permissionGranted);
+      if (result.targetWindowId && result.targetWindowId !== targetWindowId) {
+        setTargetWindowId(result.targetWindowId);
+      }
       setStepTestFeedback({
         message: result.message,
         success: result.success,
@@ -383,20 +394,30 @@ export default function App() {
   }
 
   async function runWorkflow() {
-    if (!project || targetWindowId === null || !permissionGranted || automationBusy) return;
+    if (!project || !permissionGranted || automationBusy) return;
+    const firstStepIsLaunch = project.workflow.steps[0]?.actionType === 'launch-app' || project.workflow.steps[0]?.kind === 'launch-app';
+    if (!firstStepIsLaunch && targetWindowId === null) {
+      setAutomationMessage('กรุณาเลือก Target Window ก่อนสั่ง Run');
+      return;
+    }
+
     runControl.current = { stopped: false, paused: false };
     setAutomationBusy(true);
     setRunPhase('running');
     setRunEvents([]);
     addRunEvent('workflow', `เริ่มต้นรัน Workflow: ${project.workflow.name} (${project.workflow.steps.length} ขั้นตอน)`, 'info');
 
+    let currentWindowId = targetWindowId ?? 0;
+
     try {
       await resetEmergencyStop();
-      // Ensure target window is in focus
-      try {
-        await focusWindow(targetWindowId);
-      } catch {
-        // ignore
+      // Ensure target window is in focus if window already exists
+      if (currentWindowId > 0) {
+        try {
+          await focusWindow(currentWindowId);
+        } catch {
+          // ignore
+        }
       }
 
       for (let i = 0; i < project.workflow.steps.length; i++) {
@@ -413,7 +434,11 @@ export default function App() {
           if (!await waitForResume()) throw new Error('Workflow หยุดโดยผู้ใช้');
           try {
             // Execute step using Shared Native Engine
-            const result: StepExecutionResult = await executeStep(targetWindowId, step);
+            const result: StepExecutionResult = await executeStep(currentWindowId, step, permissionGranted);
+            if (result.targetWindowId && result.targetWindowId !== currentWindowId) {
+              currentWindowId = result.targetWindowId;
+              setTargetWindowId(result.targetWindowId);
+            }
             if (result.status === 'stopped') {
               throw new Error(result.message);
             }
@@ -936,7 +961,7 @@ export default function App() {
                 <option value="click">Click — คลิกองค์ประกอบ</option>
                 <option value="double-click">Double Click — ดับเบิลคลิก</option>
                 <option value="type-text">Type Text — พิมพ์ข้อความ</option>
-                <option value="type-secret">Type Secret — พิมพ์รหัสผ่านจาก Vault Reference</option>
+                <option value="type-secret" disabled>Type Secret (ปิดใช้งานชั่วคราว — รอเชื่อม Windows Credential Manager ใน Phase 2)</option>
                 <option value="press-key">Press Key — กดปุ่มคีย์บอร์ด</option>
                 <option value="wait-visible">Wait Until Visible — รอจนพบองค์ประกอบ</option>
                 <option value="wait-hidden">Wait Until Hidden — รอจนองค์ประกอบหายไป</option>
@@ -947,6 +972,17 @@ export default function App() {
           </div>
 
           {/* Action-specific Parameters */}
+          {(draftStep.actionType === 'launch-app' || draftStep.kind === 'launch-app') && (
+            <div className="form-field" style={{ marginTop: 12 }}>
+              <label>Executable Path (หรือระบุ "DEMO" สำหรับ Built-in Demo Test Window)</label>
+              <input
+                value={draftStep.text || ''}
+                onChange={(e) => setDraftStep((prev) => ({ ...prev, text: e.target.value }))}
+                placeholder="เช่น C:\Program Files\App\app.exe หรือ DEMO"
+              />
+            </div>
+          )}
+
           {(draftStep.actionType === 'type-text' || draftStep.kind === 'type-text') && (
             <div className="form-field" style={{ marginTop: 12 }}>
               <label>Text to Type (ข้อความทั่วไป ไม่ใช่รหัสผ่าน)</label>
@@ -959,16 +995,13 @@ export default function App() {
           )}
 
           {(draftStep.actionType === 'type-secret' || draftStep.kind === 'type-secret') && (
-            <div className="form-field" style={{ marginTop: 12 }}>
-              <label>Secret Reference (Vault Key)</label>
-              <input
-                value={draftStep.secretRef || ''}
-                onChange={(e) => setDraftStep((prev) => ({ ...prev, secretRef: e.target.value }))}
-                placeholder="เช่น secret:account_password_1 (ไม่เก็บ Plaintext)"
-              />
-              <p style={{ margin: '4px 0 0', fontSize: 10, color: '#fcd34d' }}>
-                <ShieldAlert size={12} style={{ display: 'inline', marginRight: 4 }} />
-                เพื่อความปลอดภัย MIMIC จะเก็บเฉพาะ Secret Reference เท่านั้น และไม่บันทึกรหัสผ่านลงในไฟล์หรือ Logs
+            <div className="form-field" style={{ marginTop: 12, padding: 12, background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.3)', borderRadius: 6 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#f87171', fontWeight: 600 }}>
+                <ShieldAlert size={16} />
+                <span>Type Secret ถูกปิดการใช้งานชั่วคราว</span>
+              </div>
+              <p style={{ margin: '6px 0 0', fontSize: 12, color: '#fca5a5', lineHeight: 1.4 }}>
+                ตามมาตรฐานความปลอดภัย ห้ามจำลองการพิมพ์รหัสผ่านด้วย Mock Text หรือส่ง Plaintext เข้าแอปพลิเคชันจริง ฟังก์ชันนี้จะเปิดใช้งานเมื่อเชื่อมต่อ Windows Credential Manager อย่างสมบูรณ์ใน Phase 2
               </p>
             </div>
           )}
@@ -1070,7 +1103,7 @@ export default function App() {
               type="button"
               className="secondary-button"
               onClick={() => void handleTestSingleStep(draftStep)}
-              disabled={automationBusy}
+              disabled={automationBusy || draftStep.actionType === 'type-secret' || draftStep.kind === 'type-secret'}
             >
               <Play size={14} /> Test Step Now
             </button>

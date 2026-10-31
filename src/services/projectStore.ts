@@ -122,9 +122,38 @@ export function loadProjects(): Project[] {
   }
 }
 
+function sanitizeStepForStorage(step: WorkflowStep): WorkflowStep {
+  const sanitized = { ...step };
+  // Never save secrets or passwords in plain text in local storage
+  if (sanitized.actionType === 'type-secret' || sanitized.kind === 'type-secret') {
+    delete sanitized.text;
+  }
+  // Cap base64 image snippet size to prevent full-screen capture bloat and protect privacy
+  if (sanitized.locator?.imageBase64 && sanitized.locator.imageBase64.length > 131072) {
+    sanitized.locator = {
+      ...sanitized.locator,
+      imageBase64: undefined,
+    };
+  }
+  if (sanitized.expectedLocator?.imageBase64 && sanitized.expectedLocator.imageBase64.length > 131072) {
+    sanitized.expectedLocator = {
+      ...sanitized.expectedLocator,
+      imageBase64: undefined,
+    };
+  }
+  return sanitized;
+}
+
 export function saveProjects(projects: Project[]): void {
   try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(projects));
+    const sanitizedProjects = projects.map((p) => ({
+      ...p,
+      workflow: {
+        ...p.workflow,
+        steps: p.workflow.steps.map(sanitizeStepForStorage),
+      },
+    }));
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(sanitizedProjects));
   } catch {
     // Storage may be disabled; app remains usable for the current session.
   }

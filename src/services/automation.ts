@@ -59,9 +59,16 @@ export async function selectOnScreen(targetWindowId?: number): Promise<SelectOnS
 export async function executeStep(
   targetWindowId: number,
   step: WorkflowStep,
+  permissionGranted: boolean = true,
 ): Promise<StepExecutionResult> {
   requireDesktop();
-  return invoke<StepExecutionResult>('automation_execute_step', { targetWindowId, step });
+  return invoke<StepExecutionResult>('automation_execute_step', {
+    targetWindowId,
+    step: {
+      ...step,
+      permissionGranted,
+    },
+  });
 }
 
 export async function requestEmergencyStop(): Promise<AutomationRunResult> {
