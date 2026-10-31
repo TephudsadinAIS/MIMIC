@@ -5,6 +5,8 @@
 ## First principles
 - **Projects** contain application scope and workflows; **workflow steps** describe generic UI actions.
 - **Account profiles** are optional inputs, not six duplicated hardcoded workflows.
+- Profiles can be absent; 1-N configured profile aliases can be selected for sequential runs. The same workflow must execute on a PC without AI or LM Studio.
+- Persist only nonsecret workflow variables and references to credentials in the local OS vault. Machine-specific EXE paths need user remapping when importing elsewhere.
 - **Steps** are serial and have observable pre/postconditions. Steps without verification must be explicitly marked as transitional and fail safely.
 - A screenshot is a visual observation or matching template, **never** a safe place for passwords.
 - Only user-approved target windows/processes are actionable.
