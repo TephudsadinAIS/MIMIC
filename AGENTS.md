@@ -14,6 +14,8 @@ If documents conflict or a product decision is missing, explain the conflict and
 ## Product rules
 - MIMIC is a **Windows 11, local-first** assistant: observe a permitted app, teach by demonstration, review skills, execute with verification, and ask the user when uncertain.
 - **v0.1 MUST work with LM Studio completely OFF.** Keep the existing AI provider code optional and isolated; do not add required paid/cloud APIs or upload screen captures.
+- **Distribution requirement:** MIMIC Automation must run on another Windows PC with no LM Studio, model, NVIDIA GPU, internet, or cloud subscription. See `docs/OFFLINE_PORTABILITY_REQUIREMENTS.md`; AI offline must never disable deterministic workflows.
+- Multiple account profiles are **optional and configurable**, never six hardcoded accounts. Secret references are per-machine and never included in project exports.
 - Persist projects, skills, event timelines, and run history locally. Stored demonstrations/workflows are *not* automatic LLM fine-tuning.
 - Prefer explicit workflow rules and Windows accessibility information before OCR / computer vision / VLM. Never claim a screenshot alone guarantees correct action.
 - The user controls Teach / Play / Pause / Stop / **Emergency Stop**. Emergency Stop must not depend on the LLM.
