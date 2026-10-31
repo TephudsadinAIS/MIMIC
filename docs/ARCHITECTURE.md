@@ -2,6 +2,23 @@
 
 **Decision status: temporary UI scaffold, not a locked technical choice.**
 
+> **Current engineering priority (31 Oct 2026):** Develop the **non-AI Automation MVP** specified in [AUTOMATION_MVP_V01.md](AUTOMATION_MVP_V01.md). The existing LM Studio bridge remains optional; Windows automation must operate when LM Studio is closed.
+
+### Proposed native automation interfaces (not implemented)
+
+```text
+React Project / Workflow Builder / Run Monitor
+  → Typed Desktop Commands
+    → Permission + Scope Gate + Independent Emergency Stop
+    → Workflow Runner (preconditions, actions, postconditions, bounded retry)
+      → Windows Window/Process Adapter
+      → UI Automation Adapter; Visual Matcher fallback when permitted
+      → Credential Vault Adapter
+      → Local Workflow/Run Storage
+```
+
+The executor is **deterministic**. An eventual AI agent may propose draft steps but must not be a dependency for executing reviewed workflows. Build a demo-app proof before trying any game.
+
 ```text
 src/App.tsx (React UI)
   ├── Projects / Workspace / Teach placeholder / Skills placeholder / Settings
