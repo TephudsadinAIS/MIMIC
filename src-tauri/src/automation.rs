@@ -12,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 use std::{
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Mutex, Once,
     },
     thread,
@@ -43,9 +43,8 @@ use windows::{
                 CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationTreeWalker,
             },
             Input::KeyboardAndMouse::{
-                ReleaseCapture, SendInput, SetCapture, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE,
-                KEYBDINPUT, KEYEVENTF_KEYUP, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEINPUT,
-                VK_BACK, VK_ESCAPE, VK_RETURN, VK_SPACE, VK_TAB,
+                ReleaseCapture, SendInput, SetCapture, INPUT, INPUT_0, INPUT_KEYBOARD,
+                KEYBDINPUT, KEYEVENTF_KEYUP, VK_BACK, VK_ESCAPE, VK_RETURN, VK_SPACE, VK_TAB,
             },
             Shell::{
                 FileOpenDialog, IFileOpenDialog, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM,
@@ -53,7 +52,7 @@ use windows::{
             },
             WindowsAndMessaging::{
                 CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, EnumChildWindows,
-                EnumWindows, FindWindowExW, GetClassNameW, GetCursorPos, GetMessageW,
+                EnumWindows, FindWindowExW, GetClassNameW, GetCursorPos, GetDlgItem, GetMessageW,
                 GetSystemMetrics, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
                 GetWindowThreadProcessId, IsWindow, IsWindowVisible, LoadCursorW, PostMessageW,
                 PostQuitMessage, RegisterClassW, SendMessageW, SetForegroundWindow,
@@ -81,6 +80,7 @@ const DEMO_BTN_LOGIN_ID: usize = 101;
 const DEMO_EDIT_USER_ID: usize = 102;
 const DEMO_EDIT_PASS_ID: usize = 103;
 
+pub static DEMO_CLICK_COUNT: AtomicUsize = AtomicUsize::new(0);
 static DEMO_STARTED: AtomicBool = AtomicBool::new(false);
 static EMERGENCY_STOP: AtomicBool = AtomicBool::new(false);
 static REGISTER_DEMO_CLASS: Once = Once::new();
@@ -153,6 +153,9 @@ pub struct StepExecutionPayload {
     pub timeout_ms: Option<u64>,
     pub max_attempts: Option<u32>,
     pub permission_granted: Option<bool>,
+    pub target_process_id: Option<u32>,
+    pub target_exe_path: Option<String>,
+    pub target_window_title: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -217,6 +220,7 @@ unsafe fn get_process_path(pid: u32) -> Option<String> {
     let handle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid).ok()?;
     let mut buffer = [0u16; 1024];
     let written = GetModuleFileNameExW(Some(handle), None, &mut buffer);
+    let _ = windows::Win32::Foundation::CloseHandle(handle);
     if written > 0 {
         Some(String::from_utf16_lossy(&buffer[..written as usize]))
     } else {
@@ -522,6 +526,15 @@ fn decode_bmp_to_grayscale(data_url: &str) -> Option<GrayscaleImage> {
     })
 }
 
+#[link(name = "user32")]
+extern "system" {
+    fn PrintWindow(
+        hwnd: HWND,
+        hdc_blt: windows::Win32::Graphics::Gdi::HDC,
+        n_flags: u32,
+    ) -> windows::core::BOOL;
+}
+
 unsafe fn capture_window_grayscale(hwnd: HWND) -> Option<(GrayscaleImage, RECT)> {
     let mut rect = RECT::default();
     GetWindowRect(hwnd, &mut rect).ok()?;
@@ -532,12 +545,17 @@ unsafe fn capture_window_grayscale(hwnd: HWND) -> Option<(GrayscaleImage, RECT)>
         return None;
     }
 
-    let screen_dc = GetDC(None);
-    let mem_dc = CreateCompatibleDC(Some(screen_dc));
-    let bitmap = CreateCompatibleBitmap(screen_dc, width, height);
+    let win_dc = GetDC(Some(hwnd));
+    let mem_dc = CreateCompatibleDC(Some(win_dc));
+    let bitmap = CreateCompatibleBitmap(win_dc, width, height);
     let old_bmp = SelectObject(mem_dc, bitmap.into());
 
-    let _ = BitBlt(mem_dc, 0, 0, width, height, Some(screen_dc), rect.left, rect.top, SRCCOPY);
+    let printed = PrintWindow(hwnd, mem_dc, 2);
+    if !printed.as_bool() {
+        let screen_dc = GetDC(None);
+        let _ = BitBlt(mem_dc, 0, 0, width, height, Some(screen_dc), rect.left, rect.top, SRCCOPY);
+        ReleaseDC(None, screen_dc);
+    }
 
     let mut bi = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
@@ -567,7 +585,7 @@ unsafe fn capture_window_grayscale(hwnd: HWND) -> Option<(GrayscaleImage, RECT)>
     SelectObject(mem_dc, old_bmp);
     let _ = DeleteObject(bitmap.into());
     let _ = DeleteDC(mem_dc);
-    ReleaseDC(None, screen_dc);
+    ReleaseDC(Some(hwnd), win_dc);
 
     let mut pixels = Vec::with_capacity((width * height) as usize);
     for chunk in buffer.chunks_exact(4) {
@@ -588,10 +606,20 @@ unsafe fn capture_window_grayscale(hwnd: HWND) -> Option<(GrayscaleImage, RECT)>
     ))
 }
 
+#[allow(dead_code)]
 fn search_template_match(
     screen: &GrayscaleImage,
     template: &GrayscaleImage,
     threshold: f32,
+) -> Option<(i32, i32, f32)> {
+    search_template_match_with_roi(screen, template, threshold, None)
+}
+
+fn search_template_match_with_roi(
+    screen: &GrayscaleImage,
+    template: &GrayscaleImage,
+    threshold: f32,
+    roi_hint: Option<(i32, i32)>,
 ) -> Option<(i32, i32, f32)> {
     let tw = template.width;
     let th = template.height;
@@ -602,23 +630,90 @@ fn search_template_match(
         return None;
     }
 
+    // Fast-path: If ROI hint is provided, search localized region (+-120px) first
+    if let Some((hx, hy)) = roi_hint {
+        let hx_min = (hx - 120).max(0);
+        let hx_max = (hx + 120).min(sw - tw);
+        let hy_min = (hy - 120).max(0);
+        let hy_max = (hy + 120).min(sh - th);
+
+        if hx_max >= hx_min && hy_max >= hy_min {
+            let mut local_best_score = -1.0f32;
+            let mut local_best_pos = (hx_min, hy_min);
+            for sy in (hy_min..=hy_max).step_by(2) {
+                for sx in (hx_min..=hx_max).step_by(2) {
+                    let mut diff_sum: u64 = 0;
+                    for ty in (0..th).step_by(2) {
+                        let s_idx = ((sy + ty) * sw + sx) as usize;
+                        let t_idx = (ty * tw) as usize;
+                        for tx in (0..tw).step_by(2) {
+                            let s_val = screen.pixels[s_idx + tx as usize] as i32;
+                            let t_val = template.pixels[t_idx + tx as usize] as i32;
+                            diff_sum += (s_val - t_val).unsigned_abs() as u64;
+                        }
+                    }
+                    let samples = ((th + 1) / 2) * ((tw + 1) / 2);
+                    let score = 1.0 - (diff_sum as f32 / (samples as f32 * 255.0));
+                    if score > local_best_score {
+                        local_best_score = score;
+                        local_best_pos = (sx, sy);
+                    }
+                }
+            }
+
+            if local_best_score >= threshold {
+                let fx_min = (local_best_pos.0 - 3).max(0);
+                let fx_max = (local_best_pos.0 + 3).min(sw - tw);
+                let fy_min = (local_best_pos.1 - 3).max(0);
+                let fy_max = (local_best_pos.1 + 3).min(sh - th);
+
+                let mut fine_score = -1.0f32;
+                let mut fine_pos = local_best_pos;
+                for sy in fy_min..=fy_max {
+                    for sx in fx_min..=fx_max {
+                        let mut diff_sum: u64 = 0;
+                        for ty in 0..th {
+                            let s_idx = ((sy + ty) * sw + sx) as usize;
+                            let t_idx = (ty * tw) as usize;
+                            for tx in 0..tw {
+                                let s_val = screen.pixels[s_idx + tx as usize] as i32;
+                                let t_val = template.pixels[t_idx + tx as usize] as i32;
+                                diff_sum += (s_val - t_val).unsigned_abs() as u64;
+                            }
+                        }
+                        let score = 1.0 - (diff_sum as f32 / (tw as f32 * th as f32 * 255.0));
+                        if score > fine_score {
+                            fine_score = score;
+                            fine_pos = (sx, sy);
+                        }
+                    }
+                }
+                if fine_score >= threshold {
+                    return Some((fine_pos.0, fine_pos.1, fine_score));
+                }
+            }
+        }
+    }
+
+    // Full window scan (adaptive step based on resolution)
+    let step_stride: i32 = if sw > 800 || sh > 600 { 3 } else { 2 };
     let mut best_score = 0.0f32;
     let mut best_pos = (0, 0);
 
-    // Coarse scan: step by 2
-    for sy in (0..=sh - th).step_by(2) {
-        for sx in (0..=sw - tw).step_by(2) {
+    for sy in (0..=sh - th).step_by(step_stride as usize) {
+        for sx in (0..=sw - tw).step_by(step_stride as usize) {
             let mut diff_sum: u64 = 0;
-            for ty in (0..th).step_by(2) {
+            for ty in (0..th).step_by(step_stride as usize) {
                 let s_idx = ((sy + ty) * sw + sx) as usize;
                 let t_idx = (ty * tw) as usize;
-                for tx in (0..tw).step_by(2) {
+                for tx in (0..tw).step_by(step_stride as usize) {
                     let s_val = screen.pixels[s_idx + tx as usize] as i32;
                     let t_val = template.pixels[t_idx + tx as usize] as i32;
                     diff_sum += (s_val - t_val).unsigned_abs() as u64;
                 }
             }
-            let samples = ((th + 1) / 2) * ((tw + 1) / 2);
+            let samples =
+                ((th + step_stride - 1) / step_stride) * ((tw + step_stride - 1) / step_stride);
             let score = 1.0 - (diff_sum as f32 / (samples as f32 * 255.0));
             if score > best_score {
                 best_score = score;
@@ -628,10 +723,10 @@ fn search_template_match(
     }
 
     // Fine scan: step by 1 around candidate
-    let rx_min = (best_pos.0 - 3).max(0);
-    let rx_max = (best_pos.0 + 3).min(sw - tw);
-    let ry_min = (best_pos.1 - 3).max(0);
-    let ry_max = (best_pos.1 + 3).min(sh - th);
+    let rx_min = (best_pos.0 - (step_stride + 1)).max(0);
+    let rx_max = (best_pos.0 + (step_stride + 1)).min(sw - tw);
+    let ry_min = (best_pos.1 - (step_stride + 1)).max(0);
+    let ry_max = (best_pos.1 + (step_stride + 1)).min(sh - th);
 
     let mut fine_best_score = -1.0f32;
     let mut fine_best_pos = best_pos;
@@ -684,7 +779,7 @@ unsafe fn search_uia_descendants(
     if let Some(expected_id) = &locator.automation_id {
         if !expected_id.trim().is_empty() {
             let actual_id = current.CurrentAutomationId().map(|s| s.to_string()).unwrap_or_default();
-            if actual_id != *expected_id {
+            if !actual_id.eq_ignore_ascii_case(expected_id.trim()) {
                 is_match = false;
             }
         }
@@ -695,7 +790,7 @@ unsafe fn search_uia_descendants(
         if let Some(expected_name) = &locator.name {
             if !expected_name.trim().is_empty() {
                 let actual_name = current.CurrentName().map(|s| s.to_string()).unwrap_or_default();
-                if actual_name != *expected_name {
+                if !actual_name.eq_ignore_ascii_case(expected_name.trim()) {
                     is_match = false;
                 }
             }
@@ -707,7 +802,7 @@ unsafe fn search_uia_descendants(
         if let Some(expected_ctrl) = &locator.control_type {
             if !expected_ctrl.trim().is_empty() {
                 let actual_ctrl = current.CurrentLocalizedControlType().map(|s| s.to_string()).unwrap_or_default();
-                if actual_ctrl != *expected_ctrl {
+                if !actual_ctrl.eq_ignore_ascii_case(expected_ctrl.trim()) {
                     is_match = false;
                 }
             }
@@ -767,7 +862,7 @@ struct ChildSearchCtx<'a> {
 unsafe extern "system" fn enum_child_callback(child: HWND, lparam: LPARAM) -> BOOL {
     let ctx = &mut *(lparam.0 as *mut ChildSearchCtx);
     let title = title_of(child);
-    if title == ctx.expected_name {
+    if title.eq_ignore_ascii_case(ctx.expected_name) {
         let mut r = RECT::default();
         let _ = GetWindowRect(child, &mut r);
         ctx.found = Some((child, r));
@@ -798,6 +893,23 @@ pub unsafe fn resolve_locator(
 ) -> Result<ResolvedElement, String> {
     // 1. Try UIA Dynamic Resolution
     if locator.kind == "uia" || locator.automation_id.is_some() || locator.name.is_some() {
+        // Fast-path: Win32 child control ID
+        if let Some(id_str) = &locator.automation_id {
+            if let Ok(id) = id_str.trim().parse::<i32>() {
+                if let Ok(child) = windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(hwnd), id) {
+                    if !child.0.is_null() && IsWindow(Some(child)).as_bool() {
+                        let mut r = RECT::default();
+                        let _ = GetWindowRect(child, &mut r);
+                        return Ok(ResolvedElement {
+                            rect: r,
+                            child_hwnd: Some(child),
+                            method: "win32_dlg".into(),
+                        });
+                    }
+                }
+            }
+        }
+
         if let Some((elem, rect)) = resolve_uia_element(hwnd, locator) {
             let child_hwnd = elem.CurrentNativeWindowHandle().ok().and_then(|h| {
                 if h.0.is_null() { None } else { Some(h) }
@@ -827,7 +939,15 @@ pub unsafe fn resolve_locator(
             if let Some(template) = decode_bmp_to_grayscale(img_b64) {
                 if let Some((screen_img, window_rect)) = capture_window_grayscale(hwnd) {
                     let threshold = locator.threshold.unwrap_or(0.80);
-                    if let Some((mx, my, conf)) = search_template_match(&screen_img, &template, threshold) {
+                    let roi_hint = match (locator.x, locator.y) {
+                        (Some(x), Some(y)) if x >= window_rect.left && y >= window_rect.top => {
+                            Some((x - window_rect.left, y - window_rect.top))
+                        }
+                        _ => None,
+                    };
+                    if let Some((mx, my, conf)) =
+                        search_template_match_with_roi(&screen_img, &template, threshold, roi_hint)
+                    {
                         let rect = RECT {
                             left: window_rect.left + mx,
                             top: window_rect.top + my,
@@ -1287,6 +1407,7 @@ unsafe extern "system" fn demo_window_proc(
             DefWindowProcW(window, message, wparam, lparam)
         }
         WM_COMMAND if (wparam.0 & 0xffff) == DEMO_BTN_LOGIN_ID => {
+            DEMO_CLICK_COUNT.fetch_add(1, Ordering::SeqCst);
             let stage =
                 windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(window, GWLP_USERDATA);
             let button = HWND(lparam.0 as *mut _);
@@ -1320,6 +1441,7 @@ unsafe fn create_demo_window() -> Result<(), String> {
         let class = WNDCLASSW {
             hInstance: instance.into(),
             hCursor: cursor,
+            hbrBackground: HBRUSH(GetStockObject(windows::Win32::Graphics::Gdi::WHITE_BRUSH).0),
             lpszClassName: DEMO_CLASS,
             lpfnWndProc: Some(demo_window_proc),
             ..Default::default()
@@ -1430,12 +1552,37 @@ unsafe fn create_demo_window() -> Result<(), String> {
     }
 
     let _ = ShowWindow(window, SW_SHOW);
+    let _ = UpdateWindow(window);
     *DEMO_WINDOW.lock().map_err(|_| "Demo window lock failed")? = Some(window.0 as isize);
     Ok(())
 }
 
+pub unsafe fn reset_demo_window(hwnd: HWND) {
+    let _ = SetWindowTextW(hwnd, w!("MIMIC Automation Demo - Login"));
+    if let Ok(button) = GetDlgItem(Some(hwnd), DEMO_BTN_LOGIN_ID as i32) {
+        let _ = SetWindowTextW(button, w!("Continue to Server"));
+    }
+    if let Ok(edit) = GetDlgItem(Some(hwnd), DEMO_EDIT_USER_ID as i32) {
+        let _ = SetWindowTextW(edit, w!("testuser"));
+    }
+    windows::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+    DEMO_CLICK_COUNT.store(0, Ordering::SeqCst);
+    let _ = InvalidateRect(Some(hwnd), None, true);
+    let _ = UpdateWindow(hwnd);
+}
+
 pub fn start_demo() -> Result<(), String> {
     if DEMO_STARTED.swap(true, Ordering::SeqCst) {
+        if let Ok(demo_lock) = DEMO_WINDOW.lock() {
+            if let Some(id) = *demo_lock {
+                let hwnd = HWND(id as *mut _);
+                unsafe {
+                    if IsWindow(Some(hwnd)).as_bool() {
+                        reset_demo_window(hwnd);
+                    }
+                }
+            }
+        }
         return Ok(());
     }
     EMERGENCY_STOP.store(false, Ordering::SeqCst);
@@ -1568,19 +1715,87 @@ pub fn advance_demo(
 // Generic Step Execution (Shared Automation Engine)
 // -----------------------------------------------------------------------------
 
-unsafe fn verify_window_identity(hwnd: HWND) -> Result<u32, String> {
+unsafe fn verify_window_identity(hwnd: HWND, step: &StepExecutionPayload) -> Result<u32, String> {
+    // 1. Strict Permission Check: must be explicitly true
+    if !step.permission_granted.unwrap_or(false) {
+        return Err("Automation permission is false or missing; action cancelled by security policy".into());
+    }
+
+    // 2. Window Existence and Visibility Check
     if !IsWindow(Some(hwnd)).as_bool() || !IsWindowVisible(hwnd).as_bool() {
         return Err("Target window is no longer open or visible; failing closed".into());
     }
+
+    // 3. Process ID Extraction
     let mut pid = 0;
     GetWindowThreadProcessId(hwnd, Some(&mut pid));
     if pid == 0 {
         return Err("Target window process could not be identified".into());
     }
+
+    // 4. Protection: Never automate MIMIC's own UI window
+    if pid == std::process::id() && class_of(hwnd) != "MimicAutomationDemoTarget" {
+        return Err("Target window belongs to MIMIC itself; automation blocked for safety".into());
+    }
+
+    // 5. Authorized PID Matching
+    if let Some(expected_pid) = step.target_process_id {
+        if expected_pid > 0 && pid != expected_pid {
+            return Err(format!(
+                "Target window PID {} does not match authorized PID {}",
+                pid, expected_pid
+            ));
+        }
+    }
+
+    // 6. Authorized Window Title Matching
+    if let Some(expected_title) = &step.target_window_title {
+        let trimmed_title = expected_title.trim();
+        if !trimmed_title.is_empty() {
+            let cur_title = title_of(hwnd);
+            if !cur_title.to_lowercase().contains(&trimmed_title.to_lowercase()) {
+                return Err(format!(
+                    "Target window title '{}' does not match authorized title filter '{}'",
+                    cur_title, trimmed_title
+                ));
+            }
+        }
+    }
+
+    // 7. Authorized Executable Path Matching
+    if let Some(expected_exe) = &step.target_exe_path {
+        let trimmed_exe = expected_exe.trim();
+        if !trimmed_exe.is_empty() && !trimmed_exe.eq_ignore_ascii_case("DEMO") {
+            if let Some(actual_exe) = get_process_path(pid) {
+                let actual_name = std::path::Path::new(&actual_exe)
+                    .file_name()
+                    .and_then(|f| f.to_str())
+                    .unwrap_or(&actual_exe);
+                let expected_name = std::path::Path::new(trimmed_exe)
+                    .file_name()
+                    .and_then(|f| f.to_str())
+                    .unwrap_or(trimmed_exe);
+                if !actual_name.eq_ignore_ascii_case(expected_name) {
+                    return Err(format!(
+                        "Process executable '{}' does not match authorized application '{}'",
+                        actual_name, expected_name
+                    ));
+                }
+            }
+        }
+    }
+
     Ok(pid)
 }
 
-unsafe fn click_at_point(hwnd: HWND, x: i32, y: i32, double: bool) -> Result<(), String> {
+unsafe fn dispatch_click(
+    hwnd: HWND,
+    child: Option<HWND>,
+    x: i32,
+    y: i32,
+    double: bool,
+) -> Result<(), String> {
+    const WM_LBUTTONDBLCLK: u32 = 0x0203;
     let mut rect = RECT::default();
     GetWindowRect(hwnd, &mut rect).map_err(|e| e.to_string())?;
 
@@ -1593,77 +1808,47 @@ unsafe fn click_at_point(hwnd: HWND, x: i32, y: i32, double: bool) -> Result<(),
     }
 
     let _ = SetForegroundWindow(hwnd);
-    thread::sleep(Duration::from_millis(50));
+    thread::sleep(Duration::from_millis(30));
 
-    // Post direct client mouse messages to ensure reliable receipt even in headless/background execution
+    // Case 1: Target has a Win32 child HWND
+    if let Some(target_child) = child {
+        if !double {
+            // For standard button child controls, BM_CLICK is the designated Win32 programmatic click.
+            // Dispatch exactly this ONE click method and return immediately.
+            const BM_CLICK: u32 = 0x00F5;
+            SendMessageW(target_child, BM_CLICK, Some(WPARAM(0)), Some(LPARAM(0)));
+            return Ok(());
+        } else {
+            // For double click on child control, send discrete client mouse messages to child only
+            let mut pt = POINT { x, y };
+            let _ = ScreenToClient(target_child, &mut pt);
+            let lparam_pt = LPARAM(((pt.y as isize) << 16) | (pt.x as isize & 0xFFFF));
+            let _ = PostMessageW(Some(target_child), WM_LBUTTONDOWN, WPARAM(1), lparam_pt);
+            thread::sleep(Duration::from_millis(20));
+            let _ = PostMessageW(Some(target_child), WM_LBUTTONUP, WPARAM(0), lparam_pt);
+            thread::sleep(Duration::from_millis(40));
+            let _ = PostMessageW(Some(target_child), WM_LBUTTONDBLCLK, WPARAM(1), lparam_pt);
+            thread::sleep(Duration::from_millis(20));
+            let _ = PostMessageW(Some(target_child), WM_LBUTTONUP, WPARAM(0), lparam_pt);
+            return Ok(());
+        }
+    }
+
+    // Case 2: Target is UIA element without child HWND, or Image Template match.
+    // Dispatch exactly ONE mouse click to the window at the calculated coordinate.
     let mut pt = POINT { x, y };
     let _ = ScreenToClient(hwnd, &mut pt);
     let lparam_pt = LPARAM(((pt.y as isize) << 16) | (pt.x as isize & 0xFFFF));
+
     let _ = PostMessageW(Some(hwnd), WM_LBUTTONDOWN, WPARAM(1), lparam_pt);
     thread::sleep(Duration::from_millis(30));
     let _ = PostMessageW(Some(hwnd), WM_LBUTTONUP, WPARAM(0), lparam_pt);
 
-    // Also synthesize OS input if desktop is active
-    let screen_w = GetSystemMetrics(windows::Win32::UI::WindowsAndMessaging::SM_CXSCREEN) as f64;
-    let screen_h = GetSystemMetrics(windows::Win32::UI::WindowsAndMessaging::SM_CYSCREEN) as f64;
-    let norm_x = (x as f64 * 65535.0 / screen_w) as i32;
-    let norm_y = (y as f64 * 65535.0 / screen_h) as i32;
-
-    let inputs = [
-        INPUT {
-            r#type: INPUT_MOUSE,
-            Anonymous: INPUT_0 {
-                mi: MOUSEINPUT {
-                    dx: norm_x,
-                    dy: norm_y,
-                    mouseData: 0,
-                    dwFlags: windows::Win32::UI::Input::KeyboardAndMouse::MOUSEEVENTF_MOVE
-                        | windows::Win32::UI::Input::KeyboardAndMouse::MOUSEEVENTF_ABSOLUTE
-                        | MOUSEEVENTF_LEFTDOWN,
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        },
-        INPUT {
-            r#type: INPUT_MOUSE,
-            Anonymous: INPUT_0 {
-                mi: MOUSEINPUT {
-                    dx: norm_x,
-                    dy: norm_y,
-                    mouseData: 0,
-                    dwFlags: windows::Win32::UI::Input::KeyboardAndMouse::MOUSEEVENTF_ABSOLUTE
-                        | MOUSEEVENTF_LEFTUP,
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        },
-    ];
-
-    SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-
     if double {
-        thread::sleep(Duration::from_millis(80));
-        let _ = PostMessageW(Some(hwnd), WM_LBUTTONDOWN, WPARAM(1), lparam_pt);
+        thread::sleep(Duration::from_millis(60));
+        let _ = PostMessageW(Some(hwnd), WM_LBUTTONDBLCLK, WPARAM(1), lparam_pt);
         thread::sleep(Duration::from_millis(30));
         let _ = PostMessageW(Some(hwnd), WM_LBUTTONUP, WPARAM(0), lparam_pt);
-        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-    }
-    Ok(())
-}
-
-unsafe fn type_characters(hwnd: HWND, text: &str) -> Result<(), String> {
-    let _ = SetForegroundWindow(hwnd);
-    thread::sleep(Duration::from_millis(40));
-
-    for ch in text.chars() {
-        if EMERGENCY_STOP.load(Ordering::SeqCst) {
-            return Err("Emergency stop interrupted typing".into());
-        }
-        let code = ch as u32;
-        SendMessageW(hwnd, WM_CHAR, Some(WPARAM(code as usize)), Some(LPARAM(1)));
-        thread::sleep(Duration::from_millis(20));
     }
     Ok(())
 }
@@ -1715,9 +1900,9 @@ pub fn execute_step(
     target_window_id: isize,
     step: StepExecutionPayload,
 ) -> Result<StepExecutionResult, String> {
-    // 1. Permission Check
-    if let Some(false) = step.permission_granted {
-        return Err("Automation permission was not granted by user; action cancelled".into());
+    // 1. Strict Permission Check: must be explicitly true
+    if !step.permission_granted.unwrap_or(false) {
+        return Err("Automation permission is false or missing; action cancelled by security policy".into());
     }
 
     // 2. Emergency Stop Check
@@ -1757,25 +1942,36 @@ pub fn execute_step(
             }
             if let Ok(windows) = list_windows() {
                 for win in windows {
-                    let matches_pid = pid > 0 && win.process_id == pid;
-                    let matches_title = if let Some(exp) = &step.expected_state {
-                        win.title.to_lowercase().contains(&exp.to_lowercase())
-                    } else if let Some(loc) = &step.locator {
-                        loc.value
-                            .as_ref()
-                            .map(|v| win.title.to_lowercase().contains(&v.to_lowercase()))
-                            .unwrap_or(false)
-                    } else {
+                    // Strict Process Matching: Window must belong to the spawned process
+                    let is_demo_launch = exe_path.eq_ignore_ascii_case("DEMO");
+                    let matches_process = if is_demo_launch {
                         win.is_demo
+                    } else if pid > 0 {
+                        win.process_id == pid
+                    } else {
+                        false
                     };
-                    if matches_pid || matches_title {
+
+                    if matches_process {
                         let candidate_hwnd = HWND(win.id as *mut _);
                         if unsafe {
                             IsWindow(Some(candidate_hwnd)).as_bool()
                                 && IsWindowVisible(candidate_hwnd).as_bool()
                         } {
-                            new_hwnd = Some(candidate_hwnd);
-                            break;
+                            let title_ok = if let Some(exp) = &step.expected_state {
+                                win.title.to_lowercase().contains(&exp.to_lowercase())
+                            } else if let Some(loc) = &step.locator {
+                                loc.value
+                                    .as_ref()
+                                    .map(|v| win.title.to_lowercase().contains(&v.to_lowercase()))
+                                    .unwrap_or(true)
+                            } else {
+                                true
+                            };
+                            if title_ok {
+                                new_hwnd = Some(candidate_hwnd);
+                                break;
+                            }
                         }
                     }
                 }
@@ -1802,15 +1998,15 @@ pub fn execute_step(
                 })
             }
             None => Err(format!(
-                "launch-app timed out after {:?}: target window did not appear",
-                timeout
+                "launch-app timed out after {:?}: target window for process {} did not appear",
+                timeout, pid
             )),
         };
     }
 
     let hwnd = HWND(target_window_id as *mut _);
     unsafe {
-        verify_window_identity(hwnd)?;
+        verify_window_identity(hwnd, &step)?;
     }
 
     for attempt in 1..=max_attempts {
@@ -1826,7 +2022,7 @@ pub fn execute_step(
         }
 
         unsafe {
-            verify_window_identity(hwnd)?;
+            verify_window_identity(hwnd, &step)?;
         }
 
         // Retry safety guard: do not repeat an action if postconditions are already satisfied
@@ -1863,42 +2059,79 @@ pub fn execute_step(
                 "click" | "double-click" => {
                     let double = action_kind == "double-click";
                     if let Some(loc) = &step.locator {
-                        // Dynamically resolve runtime locator coordinates
                         let resolved = resolve_locator(hwnd, loc)?;
-                        if let Some(child) = resolved.child_hwnd {
-                            const BM_CLICK: u32 = 0x00F5;
-                            SendMessageW(child, BM_CLICK, Some(WPARAM(0)), Some(LPARAM(0)));
-                        }
                         let cx = (resolved.rect.left + resolved.rect.right) / 2;
                         let cy = (resolved.rect.top + resolved.rect.bottom) / 2;
-                        click_at_point(hwnd, cx, cy, double)?;
+                        dispatch_click(hwnd, resolved.child_hwnd, cx, cy, double)?;
                     } else {
                         let mut rect = RECT::default();
                         GetWindowRect(hwnd, &mut rect).map_err(|e| e.to_string())?;
-                        click_at_point(
-                            hwnd,
-                            (rect.left + rect.right) / 2,
-                            (rect.top + rect.bottom) / 2,
-                            double,
-                        )?;
+                        let cx = (rect.left + rect.right) / 2;
+                        let cy = (rect.top + rect.bottom) / 2;
+                        dispatch_click(hwnd, None, cx, cy, double)?;
                     }
                     Ok(())
                 }
                 "type-text" => {
                     let text = step.text.as_deref().unwrap_or_default();
-                    // If target input control is specified, focus it first
-                    if let Some(loc) = &step.locator {
-                        if let Ok(resolved) = resolve_locator(hwnd, loc) {
-                            if let Some(child) = resolved.child_hwnd {
-                                let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(child));
+                    let loc = step.locator.as_ref().ok_or_else(|| {
+                        "type-text requires a target locator; blind text input without an identified target element is prohibited".to_string()
+                    })?;
+
+                    // Must resolve target input control dynamically
+                    let resolved = resolve_locator(hwnd, loc)?;
+                    let cx = (resolved.rect.left + resolved.rect.right) / 2;
+                    let cy = (resolved.rect.top + resolved.rect.bottom) / 2;
+
+                    if let Some(child) = resolved.child_hwnd {
+                        let _ = SetForegroundWindow(hwnd);
+                        let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(child));
+
+                        // Activate caret by clicking child control
+                        let mut pt = POINT { x: cx, y: cy };
+                        let _ = ScreenToClient(child, &mut pt);
+                        let lparam = LPARAM(((pt.y as isize) << 16) | (pt.x as isize & 0xFFFF));
+                        let _ = PostMessageW(Some(child), WM_LBUTTONDOWN, WPARAM(1), lparam);
+                        thread::sleep(Duration::from_millis(20));
+                        let _ = PostMessageW(Some(child), WM_LBUTTONUP, WPARAM(0), lparam);
+                        thread::sleep(Duration::from_millis(40));
+
+                        // Send characters directly to child control (never to parent hwnd)
+                        for ch in text.chars() {
+                            if EMERGENCY_STOP.load(Ordering::SeqCst) {
+                                return Err("Emergency stop interrupted typing".into());
                             }
-                            let cx = (resolved.rect.left + resolved.rect.right) / 2;
-                            let cy = (resolved.rect.top + resolved.rect.bottom) / 2;
-                            let _ = click_at_point(hwnd, cx, cy, false);
-                            thread::sleep(Duration::from_millis(60));
+                            if verify_window_identity(hwnd, &step).is_err() {
+                                return Err("Target window was closed during text input".into());
+                            }
+                            let code = ch as u32;
+                            SendMessageW(child, WM_CHAR, Some(WPARAM(code as usize)), Some(LPARAM(1)));
+                            thread::sleep(Duration::from_millis(20));
+                        }
+                    } else {
+                        // UIA / Custom rendered input: focus via coordinate click and synthesize input
+                        let _ = SetForegroundWindow(hwnd);
+                        let mut pt = POINT { x: cx, y: cy };
+                        let _ = ScreenToClient(hwnd, &mut pt);
+                        let lparam = LPARAM(((pt.y as isize) << 16) | (pt.x as isize & 0xFFFF));
+                        let _ = PostMessageW(Some(hwnd), WM_LBUTTONDOWN, WPARAM(1), lparam);
+                        thread::sleep(Duration::from_millis(20));
+                        let _ = PostMessageW(Some(hwnd), WM_LBUTTONUP, WPARAM(0), lparam);
+                        thread::sleep(Duration::from_millis(40));
+
+                        for ch in text.chars() {
+                            if EMERGENCY_STOP.load(Ordering::SeqCst) {
+                                return Err("Emergency stop interrupted typing".into());
+                            }
+                            if verify_window_identity(hwnd, &step).is_err() {
+                                return Err("Target window was closed during text input".into());
+                            }
+                            let code = ch as u32;
+                            SendMessageW(hwnd, WM_CHAR, Some(WPARAM(code as usize)), Some(LPARAM(1)));
+                            thread::sleep(Duration::from_millis(20));
                         }
                     }
-                    type_characters(hwnd, text)
+                    Ok(())
                 }
                 "type-secret" => {
                     // Safe handling requirement: reject until Windows Credential Manager is integrated
@@ -1917,7 +2150,7 @@ pub fn execute_step(
                             if EMERGENCY_STOP.load(Ordering::SeqCst) {
                                 return Err("Emergency stop interrupted wait-visible".into());
                             }
-                            if verify_window_identity(hwnd).is_err() {
+                            if verify_window_identity(hwnd, &step).is_err() {
                                 return Err("Target window was closed during wait-visible".into());
                             }
                             if resolve_locator(hwnd, loc).is_ok() {
@@ -1941,7 +2174,7 @@ pub fn execute_step(
                             if EMERGENCY_STOP.load(Ordering::SeqCst) {
                                 return Err("Emergency stop interrupted wait-hidden".into());
                             }
-                            if verify_window_identity(hwnd).is_err() {
+                            if verify_window_identity(hwnd, &step).is_err() {
                                 return Err("Target window was closed during wait-hidden".into());
                             }
                             if resolve_locator(hwnd, loc).is_err() {
@@ -1981,7 +2214,31 @@ pub fn execute_step(
             continue;
         }
 
-        // Real Postcondition Verification
+        // Postcondition Verification
+        let has_expected_state = step
+            .expected_state
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        let has_expected_locator = step.expected_locator.is_some();
+        let has_postcondition = has_expected_state || has_expected_locator;
+
+        if !has_postcondition {
+            // STEP WITHOUT POSTCONDITION:
+            // Explicit behavior: Return "completed", NOT "verified"!
+            return Ok(StepExecutionResult {
+                success: true,
+                status: "completed".into(),
+                message: format!(
+                    "Action '{}' completed successfully (no postcondition configured)",
+                    step.title
+                ),
+                target_window_id,
+                attempts: attempt,
+                duration_ms: start_time.elapsed().as_millis() as u64,
+            });
+        }
+
         let deadline = Instant::now() + timeout;
         let mut condition_met = false;
 
@@ -1998,7 +2255,7 @@ pub fn execute_step(
             }
 
             unsafe {
-                if verify_window_identity(hwnd).is_err() {
+                if verify_window_identity(hwnd, &step).is_err() {
                     return Err("Target window was closed during verification".into());
                 }
 
@@ -2037,13 +2294,13 @@ pub fn execute_step(
         }
 
         if condition_met {
-            let is_completed = unsafe {
+            let is_terminal = unsafe {
                 let title = title_of(hwnd);
                 title.contains("Ready") || step.expected_state.as_deref() == Some("ready")
             };
             return Ok(StepExecutionResult {
                 success: true,
-                status: if is_completed {
+                status: if is_terminal {
                     "completed".into()
                 } else {
                     "verified".into()
@@ -2086,6 +2343,8 @@ pub fn reset_emergency_stop() {
 mod tests {
     use super::*;
 
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn test_image_template_matching_algorithm() {
         // Create synthetic grayscale target (50x50) with a distinctive pattern
@@ -2119,7 +2378,100 @@ mod tests {
     }
 
     #[test]
+    fn test_real_screen_template_matching() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        start_demo().expect("demo target should open");
+        thread::sleep(Duration::from_millis(200));
+        let demo = list_windows()
+            .expect("window enumeration should work")
+            .into_iter()
+            .find(|window| window.is_demo)
+            .expect("demo window should be found");
+
+        let hwnd = HWND(demo.id as *mut _);
+        unsafe {
+            reset_demo_window(hwnd);
+            let _ = SetForegroundWindow(hwnd);
+            let _ = UpdateWindow(hwnd);
+        }
+        thread::sleep(Duration::from_millis(150));
+
+        // Capture real rendered screen bytes of the demo window
+        let (screen_img, _rect) =
+            unsafe { capture_window_grayscale(hwnd).expect("Should capture real window grayscale") };
+        assert!(screen_img.width > 200 && screen_img.height > 100);
+
+        // Crop real button text pixels ("Continue") from the rendered screen
+        let button = unsafe { GetDlgItem(Some(hwnd), DEMO_BTN_LOGIN_ID as i32).unwrap() };
+        let mut btn_rect = RECT::default();
+        let mut win_rect = RECT::default();
+        unsafe {
+            let _ = GetWindowRect(button, &mut btn_rect);
+            let _ = GetWindowRect(hwnd, &mut win_rect);
+        }
+
+        let crop_w = 40;
+        let crop_h = 16;
+        let crop_x = (btn_rect.left - win_rect.left + 20).clamp(0, screen_img.width - crop_w);
+        let crop_y = (btn_rect.top - win_rect.top + 10).clamp(0, screen_img.height - crop_h);
+
+        let mut template_px = Vec::with_capacity((crop_w * crop_h) as usize);
+        for y in 0..crop_h {
+            for x in 0..crop_w {
+                let idx = ((crop_y + y) * screen_img.width + (crop_x + x)) as usize;
+                template_px.push(screen_img.pixels[idx]);
+            }
+        }
+        println!(
+            "crop_x={}, crop_y={}, btn_rel=({}, {}), px_min={}, px_max={}",
+            crop_x,
+            crop_y,
+            btn_rect.left - win_rect.left,
+            btn_rect.top - win_rect.top,
+            template_px.iter().min().unwrap(),
+            template_px.iter().max().unwrap(),
+        );
+
+        let template = GrayscaleImage {
+            width: crop_w,
+            height: crop_h,
+            pixels: template_px,
+        };
+
+        // 1. Match against current window
+        let match1 = search_template_match_with_roi(&screen_img, &template, 0.90, Some((crop_x, crop_y)));
+        assert!(match1.is_some(), "Template match on real screen pixels should succeed");
+        let (mx, my, score) = match1.unwrap();
+        assert!((mx - crop_x).abs() <= 2, "Matched X must match real cropped coordinates within tolerance, got {} vs {}", mx, crop_x);
+        assert!((my - crop_y).abs() <= 2, "Matched Y must match real cropped coordinates within tolerance, got {} vs {}", my, crop_y);
+        assert!(score >= 0.95, "Confidence on real identical screen crop should be >= 0.95, got {}", score);
+
+        // 2. Move window and re-verify template matching
+        unsafe {
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                260,
+                200,
+                540,
+                340,
+                windows::Win32::UI::WindowsAndMessaging::SWP_NOZORDER,
+            );
+        }
+        thread::sleep(Duration::from_millis(80));
+
+        let (moved_screen, _) = unsafe { capture_window_grayscale(hwnd).expect("Should capture moved window") };
+        let match2 = search_template_match_with_roi(&moved_screen, &template, 0.85, Some((crop_x, crop_y)));
+        assert!(match2.is_some(), "Template match after window move should locate element");
+        let (m2x, m2y, score2) = match2.unwrap();
+        assert!((m2x - crop_x).abs() <= 2, "Matched X after move should match relative button coords within tolerance");
+        assert!((m2y - crop_y).abs() <= 2, "Matched Y after move should match relative button coords within tolerance");
+        assert!(score2 >= 0.90, "Score after move should be >= 0.90, got {}", score2);
+    }
+
+    #[test]
     fn test_launch_app_and_wait_window() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let pid = launch_application("DEMO").expect("launch_application for DEMO should succeed");
         assert!(pid > 0, "Valid process ID should be returned");
 
@@ -2137,6 +2489,9 @@ mod tests {
             timeout_ms: Some(3000),
             max_attempts: Some(1),
             permission_granted: Some(true),
+            target_process_id: None,
+            target_exe_path: None,
+            target_window_title: None,
         };
         let res = execute_step(0, launch_step).expect("execute_step for launch-app should succeed");
         assert!(res.success);
@@ -2144,7 +2499,8 @@ mod tests {
     }
 
     #[test]
-    fn test_phase_1_hardening_scenarios() {
+    fn test_prevent_duplicate_clicks_and_reliable_input() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         start_demo().expect("demo target should open");
         thread::sleep(Duration::from_millis(200));
         let demo = list_windows()
@@ -2154,6 +2510,120 @@ mod tests {
             .expect("demo login window should be discoverable");
 
         let hwnd = HWND(demo.id as *mut _);
+        unsafe {
+            reset_demo_window(hwnd);
+            let _ = SetForegroundWindow(hwnd);
+            let _ = UpdateWindow(hwnd);
+        }
+        thread::sleep(Duration::from_millis(150));
+
+        // 1. Verify text input: target edit control, focus, and type
+        let text_step = StepExecutionPayload {
+            id: Some("type-1".into()),
+            title: "Type Username".into(),
+            kind: "type-text".into(),
+            action_type: Some("type-text".into()),
+            locator: Some(LocatorPayload {
+                kind: "uia".into(),
+                automation_id: Some("102".into()),
+                name: None,
+                control_type: Some("Edit".into()),
+                class_name: None,
+                image_base64: None,
+                x: None,
+                y: None,
+                width: None,
+                height: None,
+                reference_width: None,
+                reference_height: None,
+                threshold: None,
+                value: None,
+            }),
+            text: Some("mimic_pro".into()),
+            secret_ref: None,
+            key: None,
+            expected_state: None,
+            expected_locator: None,
+            timeout_ms: Some(2000),
+            max_attempts: Some(1),
+            permission_granted: Some(true),
+            target_process_id: None,
+            target_exe_path: None,
+            target_window_title: None,
+        };
+        let type_res = execute_step(demo.id, text_step).expect("type-text should succeed");
+        assert_eq!(type_res.status, "completed", "Step without postcondition must report 'completed', not 'verified'");
+
+        // Verify that characters were actually received by the target edit control
+        let edit_child = unsafe { windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(hwnd), 102).unwrap() };
+        let mut text_buf = [0u16; 64];
+        let len = unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowTextW(edit_child, &mut text_buf) };
+        let typed_text = String::from_utf16_lossy(&text_buf[..len as usize]);
+        assert!(typed_text.contains("mimic_pro"), "Typed text must be received by target edit control, got '{}'", typed_text);
+
+        // 2. Verify duplicate click prevention
+        DEMO_CLICK_COUNT.store(0, Ordering::SeqCst);
+
+        let click_step = StepExecutionPayload {
+            id: Some("click-1".into()),
+            title: "Single Click Login Button".into(),
+            kind: "click".into(),
+            action_type: Some("click".into()),
+            locator: Some(LocatorPayload {
+                kind: "uia".into(),
+                automation_id: Some("101".into()),
+                name: Some("Continue to Server".into()),
+                control_type: Some("Button".into()),
+                class_name: None,
+                image_base64: None,
+                x: None,
+                y: None,
+                width: None,
+                height: None,
+                reference_width: None,
+                reference_height: None,
+                threshold: None,
+                value: None,
+            }),
+            text: None,
+            secret_ref: None,
+            key: None,
+            expected_state: Some("server".into()),
+            expected_locator: None,
+            timeout_ms: Some(3000),
+            max_attempts: Some(1),
+            permission_granted: Some(true),
+            target_process_id: None,
+            target_exe_path: None,
+            target_window_title: None,
+        };
+
+        let click_res = execute_step(demo.id, click_step).expect("Single click step should execute");
+        assert_eq!(click_res.status, "verified");
+
+        // CRITICAL CHECK: Button must be clicked exactly ONCE (never twice or three times)
+        let total_clicks = DEMO_CLICK_COUNT.load(Ordering::SeqCst);
+        assert_eq!(total_clicks, 1, "Click action must fire exactly ONE click event to avoid duplicate triggers");
+    }
+
+    #[test]
+    fn test_phase_1_hardening_scenarios() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        start_demo().expect("demo target should open");
+        thread::sleep(Duration::from_millis(200));
+        let demo = list_windows()
+            .expect("window enumeration should work")
+            .into_iter()
+            .find(|window| window.is_demo)
+            .expect("demo login window should be discoverable");
+
+        let hwnd = HWND(demo.id as *mut _);
+        unsafe {
+            reset_demo_window(hwnd);
+            let _ = SetForegroundWindow(hwnd);
+            let _ = UpdateWindow(hwnd);
+        }
+        thread::sleep(Duration::from_millis(150));
 
         // 1. Test Permission Denied Check
         let denied_step = StepExecutionPayload {
@@ -2170,6 +2640,9 @@ mod tests {
             timeout_ms: Some(1000),
             max_attempts: Some(1),
             permission_granted: Some(false),
+            target_process_id: None,
+            target_exe_path: None,
+            target_window_title: None,
         };
         let denied_res = execute_step(demo.id, denied_step);
         assert!(denied_res.is_err(), "Must fail closed if user permission is not granted");
@@ -2190,6 +2663,9 @@ mod tests {
             timeout_ms: Some(1000),
             max_attempts: Some(1),
             permission_granted: Some(true),
+            target_process_id: None,
+            target_exe_path: None,
+            target_window_title: None,
         };
         let stop_res = execute_step(demo.id, stopped_step).expect("Should return stop result struct");
         assert_eq!(stop_res.status, "stopped", "Emergency stop must cancel step immediately");
@@ -2210,6 +2686,9 @@ mod tests {
             timeout_ms: Some(1000),
             max_attempts: Some(1),
             permission_granted: Some(true),
+            target_process_id: None,
+            target_exe_path: None,
+            target_window_title: None,
         };
         let sec_res = execute_step(demo.id, secret_step);
         assert!(sec_res.is_err(), "Type Secret must be disabled until Windows Credential Manager is integrated");
@@ -2244,6 +2723,9 @@ mod tests {
             timeout_ms: Some(500),
             max_attempts: Some(1),
             permission_granted: Some(true),
+            target_process_id: None,
+            target_exe_path: None,
+            target_window_title: None,
         };
         let miss_res = execute_step(demo.id, missing_step);
         assert!(miss_res.is_err(), "Must fail closed when element cannot be resolved");
@@ -2263,11 +2745,36 @@ mod tests {
             timeout_ms: Some(600),
             max_attempts: Some(1),
             permission_granted: Some(true),
+            target_process_id: None,
+            target_exe_path: None,
+            target_window_title: None,
         };
         let unver_res = execute_step(demo.id, unver_step);
         assert!(unver_res.is_err(), "Must fail closed if postcondition does not appear within timeout");
 
-        // 6. Test Window Moved Before Run — Dynamic Locator Resolution
+        // 6. Test Target PID Scope Verification
+        let wrong_pid_step = StepExecutionPayload {
+            id: Some("pid-1".into()),
+            title: "Wrong PID Step".into(),
+            kind: "click".into(),
+            action_type: Some("click".into()),
+            locator: None,
+            text: None,
+            secret_ref: None,
+            key: None,
+            expected_state: None,
+            expected_locator: None,
+            timeout_ms: Some(1000),
+            max_attempts: Some(1),
+            permission_granted: Some(true),
+            target_process_id: Some(999999), // deliberately wrong PID
+            target_exe_path: None,
+            target_window_title: None,
+        };
+        let wrong_pid_res = execute_step(demo.id, wrong_pid_step);
+        assert!(wrong_pid_res.is_err(), "Must reject step if target PID does not match authorized scope");
+
+        // 7. Test Window Moved Before Run — Dynamic Locator Resolution
         unsafe {
             let _ = SetWindowPos(
                 hwnd,
@@ -2310,11 +2817,14 @@ mod tests {
             timeout_ms: Some(3000),
             max_attempts: Some(2),
             permission_granted: Some(true),
+            target_process_id: None,
+            target_exe_path: None,
+            target_window_title: None,
         };
         let move_res = execute_step(demo.id, move_step).expect("Should resolve element dynamically and verify");
         assert_eq!(move_res.status, "verified");
 
-        // 7. Test Window Resized Before Next Action
+        // 8. Test Window Resized Before Next Action
         unsafe {
             let _ = SetWindowPos(
                 hwnd,
@@ -2335,7 +2845,7 @@ mod tests {
             action_type: Some("click".into()),
             locator: Some(LocatorPayload {
                 kind: "uia".into(),
-                automation_id: Some("102".into()),
+                automation_id: Some("101".into()),
                 name: Some("Select Test Server".into()),
                 control_type: Some("Button".into()),
                 class_name: None,
@@ -2357,12 +2867,15 @@ mod tests {
             timeout_ms: Some(3000),
             max_attempts: Some(2),
             permission_granted: Some(true),
+            target_process_id: None,
+            target_exe_path: None,
+            target_window_title: None,
         };
         let resize_res = execute_step(demo.id, resize_step).expect("Should resolve button on resized window");
         assert!(resize_res.success, "Resize step must succeed");
         assert_eq!(resize_res.status, "completed");
 
-        // 8. Test Target Window Closed Fails Closed
+        // 9. Test Target Window Closed Fails Closed
         unsafe {
             let _ = PostMessageW(Some(hwnd), windows::Win32::UI::WindowsAndMessaging::WM_CLOSE, WPARAM(0), LPARAM(0));
         }
@@ -2382,6 +2895,9 @@ mod tests {
             timeout_ms: Some(1000),
             max_attempts: Some(1),
             permission_granted: Some(true),
+            target_process_id: None,
+            target_exe_path: None,
+            target_window_title: None,
         };
         let closed_res = execute_step(demo.id, closed_step.clone());
         assert!(closed_res.is_err(), "Must fail closed if target window is closed");

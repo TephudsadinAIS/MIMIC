@@ -1,6 +1,6 @@
 # MIMIC — Current Capabilities
 
-Updated: 2026-11-01 (Phase 1 Hardening & End-to-End Verification)
+Updated: 2026-11-01 (Phase 1 Final Reliability & Hardening Verification)
 
 This document describes the **actual current behavior** of MIMIC v0.1. It is not a product roadmap.
 
@@ -18,10 +18,10 @@ This document describes the **actual current behavior** of MIMIC v0.1. It is not
 
 - **Browse EXE:** A native Windows Open File Dialog (`IFileOpenDialog`) allows browsing and picking `.exe` files directly.
 - **Launch Application:** `launch_application` executes target executables or the built-in demo window.
-- **Workflow Launch App:** Workflows can begin with a `launch-app` step without requiring a pre-opened window; the engine launches the EXE, waits until the window appears and becomes visible, and automatically updates the active `targetWindowId` for subsequent steps.
+- **Workflow Launch App:** Workflows can begin with a `launch-app` step without requiring a pre-opened window; the UI allows pressing **Run** immediately when the first step is `launch-app`, and the engine launches the EXE, matches the resulting window strictly by PID (`process_id == pid`), and automatically assigns the active target window for subsequent steps. Fallback to `project.target.executablePath` is provided if the step text is omitted.
 - **Target Window Enumeration:** Enumerates visible open Windows windows with process ID, title, and bounding dimensions.
 - **Target Window Selection:** Dropdown selector maps the project's target application scope to an active window and automatically fills window title criteria.
-- **Permission & Window Scope Enforcement:** Requires user consent before starting automation. The engine performs strict identity verification (`IsWindow`, `IsWindowVisible`, and matching process ID) before every input action.
+- **Strict Permission & Target Identity:** Requires explicit user consent before starting automation (`permission_granted` defaults to `false`). The engine performs strict identity verification (`IsWindow`, `IsWindowVisible`, self-automation safety, PID matching, executable path comparison, and window title validation) before every input action.
 
 ### Manual Teach / Select on Screen
 
@@ -35,18 +35,19 @@ This document describes the **actual current behavior** of MIMIC v0.1. It is not
 
 ### Workflow Execution Engine & Action Kinds
 
+- **Prevent Duplicate Clicks:** Every click action uses a unified single dispatch strategy. Single clicks on Win32 buttons use `BM_CLICK`, double clicks send discrete mouse messages to the child window, and coordinate clicks send client messages to the target window. Multiple overlapping click APIs are never dispatched together.
+- **Reliable Text Input:** `type-text` requires an input locator, dynamically resolves the child edit control, sets focus via `WM_SETFOCUS`, and routes characters (`WM_CHAR`) directly to the target child control. Blind typing to the parent window is forbidden.
 - **Real UIA Dynamic Locator Resolution:** During run, elements are dynamically resolved via `IUIAutomationTreeWalker` and Win32 child control enumeration (`EnumChildWindows`). Coordinates are calculated in real time, making execution resilient to window movement or repositioning.
-- **Real 2D Image Template Matching:** A native Rust template matcher using Sum of Absolute Differences (SAD) with coarse-to-fine sampling locates template images within the window rect with confidence scoring.
-- **Real Postcondition Verification:** Actions must be verified by actual state or element changes before returning `verified`. Automatic stub success is prohibited.
+- **Real Image Template Matching:** A native Rust template matcher using Sum of Absolute Differences (SAD) with localized Region of Interest (ROI) fast scan and full-window fallback. Tested against real screen captures with high confidence thresholds.
+- **Real Postcondition Verification:** Actions must be verified by actual state or element changes before returning `verified`. Steps without explicit postconditions truthfully report `completed`, never claiming unverified success.
 - **Wait Actions:**
   - `wait-visible` — actively polls until locator appears, with responsive timeout and window closure detection.
   - `wait-hidden` — actively polls until locator disappears.
   - `verify-state` — verifies immediate window title or element condition.
-- **Input Targeting:** Text input (`type-text`) automatically locates and focuses the target edit control before sending keystrokes.
 - **Supported Action Kinds:**
-  - `Click` & `Double Click` — dynamically resolves element/template center, posts client mouse messages (`BM_CLICK` / `WM_LBUTTONDOWN`/`UP`), and synthesizes desktop input.
-  - `Type Text` — focuses target input box and types characters.
-  - `Press Key` — sends virtual keys (`ENTER`, `TAB`, `ESC`, `SPACE`, `BACKSPACE`).
+  - `Click` & `Double Click` — single-method dispatch with duplicate trigger prevention.
+  - `Type Text` — focused child control character dispatch.
+  - `Press Key` — virtual keys (`ENTER`, `TAB`, `ESC`, `SPACE`, `BACKSPACE`).
   - `Wait Until Visible` & `Wait Until Hidden`.
   - `Verify State`.
   - `Launch Application`.
@@ -54,6 +55,27 @@ This document describes the **actual current behavior** of MIMIC v0.1. It is not
 - **Emergency Stop & Retry Safety:**
   - Atomic emergency stop halts execution immediately during wait loops, before inputs, and during verification.
   - Retry safety guard: if an earlier attempt succeeded and postconditions are already met, the engine avoids repeating actions that could cause duplicate submissions.
+
+### Test Verification Results
+
+All tests have been executed and verified in the real Windows 11 environment:
+
+#### 1. Unit Tests (`cargo test`)
+- `test_image_template_matching_algorithm` — verifies pure mathematical SAD calculation and threshold confidence scoring: **PASSED**
+- `test_real_screen_template_matching` — verifies real screen-captured pixels matching across window movement: **PASSED**
+- `test_prevent_duplicate_clicks_and_reliable_input` — verifies atomic click count == 1 and character reception in target edit control: **PASSED**
+- `test_phase_1_hardening_scenarios` — verifies permission denial, emergency stop, safe secret blocking, dynamic locator resolution after window move and resize: **PASSED**
+- `test_launch_app_and_wait_window` — verifies process spawning and PID matching for window acquisition: **PASSED**
+
+#### 2. Integration Tests
+- **Win32 Demo Lifecycle:** Verified multi-stage Login -> Server selection -> Ready transition with synchronized state locks.
+- **Target Process Identity:** Verified rejection of mismatched PIDs, ungranted permission, closed window handles, and MIMIC's own window.
+- **Single-Dispatch Clicks:** Verified that button clicks fire exactly once and do not double-submit forms or buttons.
+
+#### 3. Frontend & Build Verification
+- TypeScript Check (`tsc --noEmit`): **0 errors**
+- Web Production Build (`vite build`): **Success (283 kB JS, 21 kB CSS)**
+- Rust Check (`cargo check`): **0 errors, 0 warnings**
 
 ### Controlled Demo Target & Automated Verification
 

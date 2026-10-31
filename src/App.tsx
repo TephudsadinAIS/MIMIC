@@ -71,7 +71,7 @@ export default function App() {
   // Target Application & Window State
   const [targetWindows, setTargetWindows] = useState<TargetWindow[]>([]);
   const [targetWindowId, setTargetWindowId] = useState<number | null>(null);
-  const [permissionGranted, setPermissionGranted] = useState(true);
+  const [permissionGranted, setPermissionGranted] = useState(false);
   const [automationBusy, setAutomationBusy] = useState(false);
   const [automationMessage, setAutomationMessage] = useState('พร้อมใช้งาน: เลือก Application Scope และหน้าต่างเป้าหมาย');
   const [runPhase, setRunPhase] = useState<WorkflowRunPhase>('idle');
@@ -336,6 +336,13 @@ export default function App() {
       setStepTestFeedback({ message: 'กรุณาเลือก Target Window ก่อนทดสอบ', success: false });
       return;
     }
+    if (!permissionGranted) {
+      setStepTestFeedback({
+        message: 'กรุณาเปิดสิทธิ์ Permission (ติ๊กถูกช่องอนุญาต Automation ด้านบน) ก่อนทดสอบ Step',
+        success: false,
+      });
+      return;
+    }
     if (stepToTest.actionType === 'type-secret' || stepToTest.kind === 'type-secret') {
       setStepTestFeedback({
         message: 'Type Secret ถูกปิดการใช้งานเพื่อความปลอดภัย (รอเชื่อมต่อ Windows Credential Manager ใน Phase 2)',
@@ -347,9 +354,16 @@ export default function App() {
     setStepTestFeedback(null);
     try {
       await resetEmergencyStop();
-      const result: StepExecutionResult = await executeStep(targetWindowId ?? 0, stepToTest, permissionGranted);
+      const matchedWin = targetWindows.find((w) => w.id === targetWindowId);
+      const scope = {
+        targetProcessId: matchedWin?.processId,
+        targetExePath: matchedWin?.exePath || project?.target.executablePath,
+        targetWindowTitle: project?.target.windowTitleContains || matchedWin?.title,
+      };
+      const result: StepExecutionResult = await executeStep(targetWindowId ?? 0, stepToTest, permissionGranted, scope);
       if (result.targetWindowId && result.targetWindowId !== targetWindowId) {
         setTargetWindowId(result.targetWindowId);
+        void refreshWindows();
       }
       setStepTestFeedback({
         message: result.message,
@@ -434,10 +448,25 @@ export default function App() {
           if (!await waitForResume()) throw new Error('Workflow หยุดโดยผู้ใช้');
           try {
             // Execute step using Shared Native Engine
-            const result: StepExecutionResult = await executeStep(currentWindowId, step, permissionGranted);
+            const stepToRun: WorkflowStep = {
+              ...step,
+              text: (step.actionType === 'launch-app' || step.kind === 'launch-app') && (!step.text || step.text.trim().length === 0)
+                ? (project.target.executablePath || 'DEMO')
+                : step.text,
+            };
+
+            const matchedWin = targetWindows.find((w) => w.id === currentWindowId);
+            const scope = {
+              targetProcessId: matchedWin?.processId,
+              targetExePath: matchedWin?.exePath || project.target.executablePath,
+              targetWindowTitle: project.target.windowTitleContains || matchedWin?.title,
+            };
+
+            const result: StepExecutionResult = await executeStep(currentWindowId, stepToRun, permissionGranted, scope);
             if (result.targetWindowId && result.targetWindowId !== currentWindowId) {
               currentWindowId = result.targetWindowId;
               setTargetWindowId(result.targetWindowId);
+              void refreshWindows();
             }
             if (result.status === 'stopped') {
               throw new Error(result.message);
@@ -666,9 +695,20 @@ export default function App() {
           </div>
 
           <div className="workspace-toolbar">
-            <button type="button" className="toolbar-primary" onClick={() => void runWorkflow()} disabled={automationBusy || targetWindowId === null || !permissionGranted} title="รัน Workflow ทั้งหมด">
-              <Play size={16} /> Run Workflow
-            </button>
+            {(() => {
+              const firstStepIsLaunch = project.workflow.steps[0]?.actionType === 'launch-app' || project.workflow.steps[0]?.kind === 'launch-app';
+              return (
+                <button
+                  type="button"
+                  className="toolbar-primary"
+                  onClick={() => void runWorkflow()}
+                  disabled={automationBusy || (!firstStepIsLaunch && targetWindowId === null) || !permissionGranted}
+                  title={!permissionGranted ? 'กรุณาติ๊กอนุญาต Permission ก่อนสั่ง Run' : 'รัน Workflow ทั้งหมด'}
+                >
+                  <Play size={16} /> Run Workflow
+                </button>
+              );
+            })()}
             <button type="button" onClick={pauseOrResumeWorkflow} disabled={runPhase !== 'running' && runPhase !== 'paused'}>
               {runPhase === 'paused' ? <><Play size={15} /> Resume</> : <><Pause size={15} /> Pause</>}
             </button>

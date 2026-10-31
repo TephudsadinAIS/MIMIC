@@ -83,6 +83,10 @@ export interface WorkflowStep {
   text?: string;
   secretRef?: string;
   key?: string;
+  permissionGranted?: boolean;
+  targetProcessId?: number;
+  targetExePath?: string;
+  targetWindowTitle?: string;
 }
 
 export interface Workflow {

@@ -59,7 +59,8 @@ export async function selectOnScreen(targetWindowId?: number): Promise<SelectOnS
 export async function executeStep(
   targetWindowId: number,
   step: WorkflowStep,
-  permissionGranted: boolean = true,
+  permissionGranted: boolean = false,
+  scope?: { targetProcessId?: number; targetExePath?: string; targetWindowTitle?: string },
 ): Promise<StepExecutionResult> {
   requireDesktop();
   return invoke<StepExecutionResult>('automation_execute_step', {
@@ -67,6 +68,9 @@ export async function executeStep(
     step: {
       ...step,
       permissionGranted,
+      targetProcessId: scope?.targetProcessId ?? step.targetProcessId,
+      targetExePath: scope?.targetExePath ?? step.targetExePath,
+      targetWindowTitle: scope?.targetWindowTitle ?? step.targetWindowTitle,
     },
   });
 }
