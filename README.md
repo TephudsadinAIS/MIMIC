@@ -22,6 +22,16 @@
 > [!IMPORTANT]
 > **MIMIC ยังอยู่ในขั้นออกแบบ (Concept / Planning)** — README นี้อธิบาย **วิสัยทัศน์และฟีเจอร์ที่วางแผนจะสร้าง** ไม่ได้หมายความว่าความสามารถดังกล่าวพัฒนาเสร็จหรือใช้งานได้แล้ว
 
+## 🎯 Immediate milestone — MIMIC v0.1 (No AI Automation)
+
+**We are implementing deterministic Windows desktop automation before AI teaching.** The application should launch an explicitly allowed EXE, locate known UI states, take scoped actions, verify the result, and stop when a screen is unexpected — **without opening LM Studio**. The first target is a controlled demo application, not a commercial game.
+
+**Development handoff:** [Automation MVP specification](docs/AUTOMATION_MVP_V01.md) · [Workflow contract](docs/WORKFLOW_CONTRACT_V01.md) · [Prompt for Gemini](docs/PROMPT_GEMINI_AUTOMATION_V01.md)
+
+> This is a **planned milestone**. Actual screen control, credential entry, workflow execution and multi-profile sequencing are not yet implemented. Any real-game automation must respect service rules and technical restrictions.
+
+---
+
 ## 🛠️ Current codebase — v0.1 UI Scaffold
 
 > The repository now includes an **early desktop application source scaffold**, not a completed autonomous assistant. It has **not yet been verified on the target Windows computer**.
