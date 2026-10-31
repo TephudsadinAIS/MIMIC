@@ -1,5 +1,7 @@
 # Phase 0 — Technical Verification Checklist
 
+**Current sequencing (31 Oct 2026):** Start with the no-AI Windows Automation experiments described in [AUTOMATION_MVP_V01.md](AUTOMATION_MVP_V01.md). Sections about LM Studio/VLM are **deferred**, not blocking the first Automation MVP. The first proof must use a controlled demo application, explicit permission, and an independent Emergency Stop.
+
 **Status:** Not started. This checklist is for a Windows machine with LM Studio installed. No experiment below is marked as passed without evidence.
 
 ## Objective
