@@ -2,16 +2,18 @@
 
 > Read this file before changing code. The repository is currently in planning / early development, not a shipped application.
 
-## Source of truth
-1. `MIMIC_PROJECT_OVERVIEW.md` — requirements, scope, safety, and phased plan.
-2. `README.md` — product vision and user-facing overview.
-3. `docs/PHASE_0_CHECKLIST.md` — first experiments and acceptance criteria.
+## Source of truth (current v0.1 priority: Automation without AI)
+1. `docs/AUTOMATION_MVP_V01.md` — **current first-delivery scope and acceptance criteria**.
+2. `docs/WORKFLOW_CONTRACT_V01.md` — draft reusable workflow model.
+3. `docs/PHASE_0_CHECKLIST.md` — controlled Windows verification; AI checks are optional for v0.1.
+4. `docs/ARCHITECTURE.md` and `docs/IMPLEMENTATION_STATUS.md` — existing architecture and status.
+5. `MIMIC_PROJECT_OVERVIEW.md` and `README.md` — long-term vision and public overview.
 
 If documents conflict or a product decision is missing, explain the conflict and ask rather than silently inventing requirements.
 
 ## Product rules
 - MIMIC is a **Windows 11, local-first** assistant: observe a permitted app, teach by demonstration, review skills, execute with verification, and ask the user when uncertain.
-- Use **LM Studio** first through a local AI provider adapter. Do not silently add a required paid/cloud API or upload screen captures.
+- **v0.1 MUST work with LM Studio completely OFF.** Keep the existing AI provider code optional and isolated; do not add required paid/cloud APIs or upload screen captures.
 - Persist projects, skills, event timelines, and run history locally. Stored demonstrations/workflows are *not* automatic LLM fine-tuning.
 - Prefer explicit workflow rules and Windows accessibility information before OCR / computer vision / VLM. Never claim a screenshot alone guarantees correct action.
 - The user controls Teach / Play / Pause / Stop / **Emergency Stop**. Emergency Stop must not depend on the LLM.
@@ -44,5 +46,11 @@ If documents conflict or a product decision is missing, explain the conflict and
 - `src/`: React UI and typed services. Home/Projects and text-chat UX are implemented in source; the Teach, Skill, Live Screen and Run surfaces are **disabled placeholders**.
 - `src-tauri/`: Tauri 2 Rust shell with only `ai_status` and `ai_chat` commands reaching fixed localhost LM Studio. No arbitrary OS control exists.
 - `docs/GETTING_STARTED.md`, `docs/ARCHITECTURE.md`, `docs/IMPLEMENTATION_STATUS.md` explain how to build, what is not tested, and what remains.
-- First agent priority: run `npm install`, `npm run check`, `npm run dev` on Windows; confirm local LM Studio; record issues before implementing capture/automation.
+- First agent priority: run `npm install`, `npm run check`, `npm run dev` on Windows; then implement and verify a no-AI workflow on a user-controlled demo application. LM Studio is optional.
 - Change the stack when verified technical constraints justify it. Preserve product boundaries, API isolation, privacy, and truthful UI states.
+
+## Implementation handoff
+- The user-approved development handoff prompt is `docs/PROMPT_GEMINI_AUTOMATION_V01.md`. It targets the existing repo, not a fresh application.
+- First deliver Milestone A (safe demo Observe → Act → Verify) before Milestones B–D.
+- Do not hardcode Yulgang interactions; the real game is a **validation target only** if allowed by its terms and protections.
+- Maintain support for reviewing generic steps and adding conditional verification, not blind fixed-delay macro sequences.
