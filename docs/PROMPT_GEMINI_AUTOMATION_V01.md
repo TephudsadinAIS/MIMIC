@@ -18,19 +18,19 @@ https://github.com/TephudsadinAIS/MIMIC
 
 ## อ่านไฟล์เหล่านี้ให้ครบก่อนแก้โค้ด
 
-1. \`AGENTS.md\`
-2. \`docs/AUTOMATION_MVP_V01.md\` (**ขอบเขตงานล่าสุด ให้ความสำคัญสูงสุด**)
-3. \`docs/WORKFLOW_CONTRACT_V01.md\`
-4. \`docs/ARCHITECTURE.md\`
-5. \`docs/IMPLEMENTATION_STATUS.md\`
-6. \`MIMIC_PROJECT_OVERVIEW.md\` (เป้าหมายระยะยาว ไม่ใช่ขอบเขต MVP)
+1. `AGENTS.md`
+2. `docs/AUTOMATION_MVP_V01.md` (**ขอบเขตงานล่าสุด ให้ความสำคัญสูงสุด**)
+3. `docs/WORKFLOW_CONTRACT_V01.md`
+4. `docs/ARCHITECTURE.md`
+5. `docs/IMPLEMENTATION_STATUS.md`
+6. `MIMIC_PROJECT_OVERVIEW.md` (เป้าหมายระยะยาว ไม่ใช่ขอบเขต MVP)
 
 ## สิ่งที่ต้องลงมือทำ
 
 **A. ตรวจสอบโค้ดเดิมให้ใช้งานได้จริง**
 - Clone / pull branch ล่าสุด จากนั้นตรวจโครงสร้างและสิ่งที่ implement แล้ว
 - ตรวจ Node, npm, Rust, MSVC, WebView2 และ Tauri requirements ใน Windows
-- รัน \`npm install\`, \`npm run check\`, \`npm run build:web\`, \`npm run dev\`
+- รัน `npm install`, `npm run check`, `npm run build:web`, `npm run dev`
 - แก้ปัญหา build/runtime จริงที่พบ โดยอธิบายเหตุผลและรายงานผลทดสอบ
 - ไม่ต้องเปิด LM Studio; หากปิดอยู่ MIMIC ต้องใช้งานฟังก์ชัน Automation ได้
 
