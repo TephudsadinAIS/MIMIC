@@ -1,5 +1,7 @@
 # MIMIC v0.1 — Getting Started (Windows 11)
 
+> **Automation-first update:** The next feature to build is generic Windows Automation without AI. See [AUTOMATION_MVP_V01.md](AUTOMATION_MVP_V01.md) and [PROMPT_GEMINI_AUTOMATION_V01.md](PROMPT_GEMINI_AUTOMATION_V01.md). Existing chat code is optional; LM Studio is not required to test the UI or future workflow runner.
+
 > **Current state:** UI scaffold with local project metadata and a real LM Studio text-chat bridge. Screen observation, recording, speech, and computer control do **not** exist yet. The desktop app has not been built or run on the user's Windows computer by ChatGPT.
 
 ## Why this scaffold?
