@@ -20,6 +20,13 @@ The user eventually wants multiple account profiles. The program should run the 
 
 **This is not an autonomous game-playing bot**, and daily quests, combat, bot evasion, CAPTCHA bypass, or anti-cheat circumvention are not part of v0.1. Check the relevant game's terms and technical protections before testing automation against the game.
 
+## Distribution and profile requirements
+
+- The product must be installable and the **Automation Core must operate on other Windows PCs without LM Studio, AI models, NVIDIA GPU, internet, or AI subscriptions**. Native runtime prerequisites such as WebView2 must be documented and tested. AI features remain optional.
+- Multi-account support is **configurable and optional**: zero, one, or N user-defined profiles; a selected set can be queued sequentially. Never hardcode six accounts or require account setup for normal workflows.
+- Reusing workflows across machines requires a future explicit project export/import including templates but excluding credentials; local EXE paths and OS-vault references must be reconfigured.
+- Detailed specification and test criteria: [OFFLINE_PORTABILITY_REQUIREMENTS.md](OFFLINE_PORTABILITY_REQUIREMENTS.md).
+
 ## 2. Product design
 
 ### Project Home
