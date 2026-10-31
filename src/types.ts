@@ -6,10 +6,39 @@ export interface Project {
   description: string;
   createdAt: string;
   workflow: Workflow;
+  target: ProjectTarget;
+  credentialRefs: CredentialReference[];
+}
+
+export type ProjectTargetKind = 'controlled-demo' | 'configured-application';
+
+export interface ProjectTarget {
+  kind: ProjectTargetKind;
+  executablePath: string;
+  windowTitleContains: string;
+}
+
+// A vault key is only an opaque reference. It must never contain the secret itself.
+export interface CredentialReference {
+  id: string;
+  alias: string;
+  vaultKey: string;
+  enabled: boolean;
 }
 
 export type DemoState = 'login' | 'server' | 'ready';
-export type WorkflowStepKind = 'wait-for-state' | 'advance';
+export type WorkflowStepKind =
+  | 'wait-for-state'
+  | 'advance'
+  | 'wait-for-window'
+  | 'click-uia'
+  | 'click-template'
+  | 'type-secret';
+
+export type Locator =
+  | { kind: 'window-title'; value: string }
+  | { kind: 'uia'; automationId: string; name: string; controlType: string }
+  | { kind: 'template'; assetId: string; threshold: number };
 
 export interface WorkflowStep {
   id: string;
@@ -18,6 +47,8 @@ export interface WorkflowStep {
   expectedState: DemoState;
   timeoutMs: number;
   maxAttempts: number;
+  locator?: Locator;
+  credentialRefId?: string;
 }
 
 export interface Workflow {

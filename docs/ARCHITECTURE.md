@@ -48,7 +48,7 @@ src-tauri/src/lib.rs (Rust, narrow exposed commands)
 |---|---|---|
 | Windows desktop shell | Tauri 2 source scaffold | Build/test on Windows |
 | UI | Responsive React desktop layout | User feedback + usability testing |
-| Projects | Save non-sensitive names, descriptions and controlled-demo workflow definitions in localStorage | SQLite and user-selected application settings |
+| Projects | Save non-sensitive names, descriptions, workflow definitions and target-app configuration in localStorage | SQLite and native file picker |
 | Local AI | Model listing + Thai text chat via Rust/LM Studio | Health checks, cancellation, model/VLM capabilities |
 | Observation | Controlled Demo window identity and labeled state verification; no capture | UI Automation selector and authorized capture |
 | Teach | Clearly disabled | Event timeline and redacted demonstrations |
@@ -66,5 +66,5 @@ src-tauri/src/lib.rs (Rust, narrow exposed commands)
 
 ## Limitations
 - Tauri compilation, Windows installers, and LM Studio interoperability **have not been verified in this session**; build and runtime tests must be recorded in `docs/PHASE_0_CHECKLIST.md`.
-- The Workflow Builder currently runs only the controlled Demo Target. It is not a general Windows UI Automation engine, cannot launch arbitrary executables, and does not capture screens or accept credentials.
+- Projects can now retain an intended executable path and required window-title text, but this is configuration only. The Workflow Builder currently runs only the controlled Demo Target; it cannot launch arbitrary executables, capture screens, inspect external windows, or accept credentials.
 - A demonstration is not model weight training. Future skills should be versioned, human reviewed, and executed with explicit checks.

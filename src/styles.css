@@ -119,6 +119,11 @@ h1, h2, h3, p { overflow-wrap:anywhere; }
 .permission-check input { margin:2px 0 0; accent-color:#2e8bf5; }
 .workflow-panel { min-width:320px; }
 .workflow-panel .panel-heading { min-height:76px; }
+.application-scope { display:grid; gap:8px; padding:13px 14px; border-bottom:1px solid #263952; background:#0e1b2d; }
+.application-scope > select, .application-scope input { width:100%; border:1px solid #35516f; border-radius:7px; background:#101e32; color:#dcecff; padding:8px; font-size:10px; }
+.application-scope label { display:grid; gap:5px; color:#a8c1dc; font-size:10px; }
+.application-scope p { margin:0; color:#7d9aba; font-size:10px; line-height:1.55; }
+.application-scope .scope-warning { color:#ffc985; }
 .workflow-steps { display:grid; gap:8px; padding:12px; max-height:365px; overflow:auto; }
 .workflow-step { display:grid; grid-template-columns:25px minmax(0,1fr) auto; gap:8px; align-items:start; padding:9px; background:#0d1a2c; border:1px solid #293d58; border-radius:9px; }
 .workflow-step.active { border-color:#4a9bf0; box-shadow:0 0 0 1px #4a9bf044; }

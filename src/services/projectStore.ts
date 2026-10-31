@@ -1,6 +1,10 @@
-import type { DemoState, Project, Workflow, WorkflowStep } from '../types';
+import type { CredentialReference, DemoState, Project, ProjectTarget, Workflow, WorkflowStep } from '../types';
 
 const STORAGE_KEY = 'mimic.project-metadata.v1';
+
+export function createControlledDemoTarget(): ProjectTarget {
+  return { kind: 'controlled-demo', executablePath: '', windowTitleContains: 'MIMIC Automation Demo' };
+}
 
 export function createDemoWorkflow(id: string): Workflow {
   const step = (suffix: string, title: string, kind: WorkflowStep['kind'], expectedState: DemoState): WorkflowStep => ({
@@ -37,12 +41,32 @@ function readWorkflow(value: unknown, projectId: string): Workflow {
   const steps = candidate.steps.filter((step): step is WorkflowStep =>
     typeof step === 'object' && step !== null &&
     typeof step.id === 'string' && typeof step.title === 'string' &&
-    (step.kind === 'wait-for-state' || step.kind === 'advance') &&
+    (step.kind === 'wait-for-state' || step.kind === 'advance' || step.kind === 'wait-for-window' || step.kind === 'click-uia' || step.kind === 'click-template' || step.kind === 'type-secret') &&
     isDemoState(step.expectedState) &&
     typeof step.timeoutMs === 'number' && Number.isFinite(step.timeoutMs) &&
     typeof step.maxAttempts === 'number' && Number.isFinite(step.maxAttempts),
   );
   return { schemaVersion: 1, id: candidate.id, name: candidate.name, steps };
+}
+
+function readTarget(value: unknown): ProjectTarget {
+  if (typeof value !== 'object' || value === null) return createControlledDemoTarget();
+  const target = value as Partial<ProjectTarget>;
+  if (target.kind !== 'controlled-demo' && target.kind !== 'configured-application') return createControlledDemoTarget();
+  return {
+    kind: target.kind,
+    executablePath: typeof target.executablePath === 'string' ? target.executablePath.slice(0, 1024) : '',
+    windowTitleContains: typeof target.windowTitleContains === 'string' ? target.windowTitleContains.slice(0, 200) : '',
+  };
+}
+
+function readCredentialReferences(value: unknown): CredentialReference[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((reference): reference is CredentialReference =>
+    typeof reference === 'object' && reference !== null &&
+    typeof reference.id === 'string' && typeof reference.alias === 'string' &&
+    typeof reference.vaultKey === 'string' && typeof reference.enabled === 'boolean',
+  ).map((reference) => ({ ...reference, alias: reference.alias.slice(0, 100), vaultKey: reference.vaultKey.slice(0, 300) }));
 }
 
 // Only non-sensitive project metadata is stored here as a transitional UI scaffold.
@@ -53,11 +77,16 @@ export function loadProjects(): Project[] {
     if (!raw) return [];
     const value: unknown = JSON.parse(raw);
     if (!Array.isArray(value)) return [];
-    return value.filter((project): project is Omit<Project, 'workflow'> =>
+    return value.filter((project): project is Omit<Project, 'workflow' | 'target' | 'credentialRefs'> =>
       typeof project === 'object' && project !== null &&
       typeof project.id === 'string' && typeof project.name === 'string' &&
       typeof project.description === 'string' && typeof project.createdAt === 'string',
-    ).map((project) => ({ ...project, workflow: readWorkflow((project as Partial<Project>).workflow, project.id) }));
+    ).map((project) => ({
+      ...project,
+      workflow: readWorkflow((project as Partial<Project>).workflow, project.id),
+      target: readTarget((project as Partial<Project>).target),
+      credentialRefs: readCredentialReferences((project as Partial<Project>).credentialRefs),
+    }));
   } catch {
     return [];
   }

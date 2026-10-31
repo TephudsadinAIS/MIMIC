@@ -19,6 +19,8 @@ Updated: 2026-10-31.
 - [x] Native Emergency Stop flag outside LM Studio and the automation action path.
 - [x] Controlled-demo Workflow Builder: local save/load, editable/reorderable `wait-for-state` and `advance` steps, per-step timeout/retry fields, and a run-event monitor.
 - [x] Controlled-demo runner: Run, Pause, Resume and Emergency Stop state handling, bounded attempt counts, and exact state verification after every action.
+- [x] Non-executable Project Target configuration: controlled demo vs. configured Windows application, optional executable path, and required window title; execution is visibly disabled for configured applications.
+- [x] Workflow schema reserves generic locator and secret-reference types without persisting password values.
 - [ ] Generic target adapters, application picker/launcher, accessibility selectors, visual matching, and secure credential references (Milestone B/C; not implemented).
 - [ ] Optional sequential profile queue only after single-profile demo passes.
 - Current spec: [AUTOMATION_MVP_V01.md](AUTOMATION_MVP_V01.md); agent prompt: [PROMPT_GEMINI_AUTOMATION_V01.md](PROMPT_GEMINI_AUTOMATION_V01.md).
@@ -32,6 +34,7 @@ Updated: 2026-10-31.
 - [x] Release NSIS installer builds on Windows: `src-tauri/target/release/bundle/nsis/MIMIC_0.1.0_x64-setup.exe` (2026-10-31; 2.78 MiB).
 - [x] Automated native Observe → Act → Verify controlled demonstration: Login → Server → Ready, terminal fail-closed behavior, missing-target failure, and state observation (`cargo test`, 2026-10-31).
 - [ ] UI end-to-end test of Workflow Builder and Run Monitor — pending explicit permission to control the test desktop.
+- [ ] Configured-application target UI and schema verification — intentionally not run in this change at user request.
 
 **No check box above is marked tested merely because its source was committed.**
 
