@@ -16,6 +16,7 @@ function StatusPill({ connection }: { connection: ConnectionState }) {
   const connected = connection.phase === 'ready';
   const label = connection.phase === 'checking' ? 'กำลังตรวจสอบ...' :
     connected ? (connection.status.models.length ? 'Local AI Connected' : 'Server Connected · No Model') :
+    connection.phase === 'disabled' ? 'Local AI Off' :
     connection.phase === 'browser' ? 'Browser Preview' : 'Local AI Offline';
   return <span className={'status-pill ' + (connected ? 'online' : 'offline')}>
     <span className="status-dot" /> {label}
@@ -52,6 +53,7 @@ export default function App() {
   const [connection, setConnection] = useState<ConnectionState>(
     isDesktop() ? { phase: 'checking' } : { phase: 'browser' },
   );
+  const [aiEnabled, setAiEnabled] = useState(true);
   const [model, setModel] = useState('');
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
   const [draft, setDraft] = useState('');
@@ -69,7 +71,7 @@ export default function App() {
 
   const project = projects.find((item) => item.id === selectedId) ?? null;
   const selectedModels: string[] = connection.phase === 'ready' ? connection.status.models : [];
-  const canChat = connection.phase === 'ready' && model.length > 0 && !busy;
+  const canChat = aiEnabled && connection.phase === 'ready' && model.length > 0 && !busy;
 
   const refreshAi = useCallback(async () => {
     if (!isDesktop()) {
@@ -88,7 +90,18 @@ export default function App() {
   }, []);
 
   useEffect(() => { saveProjects(projects); }, [projects]);
-  useEffect(() => { void refreshAi(); }, [refreshAi]);
+  useEffect(() => { if (aiEnabled) void refreshAi(); }, [aiEnabled, refreshAi]);
+
+  function toggleAi() {
+    if (aiEnabled) {
+      setAiEnabled(false);
+      setConnection({ phase: 'disabled' });
+      setModel('');
+      setChatError('');
+      return;
+    }
+    setAiEnabled(true);
+  }
 
   async function refreshWindows() {
     try {
@@ -288,7 +301,7 @@ export default function App() {
         <div className="assistant-welcome">
           <span className="assistant-bubble"><Sparkles size={20} /></span>
           <strong>สวัสดีครับ ผม MIMIC</strong>
-          <p>พูดคุยกับโมเดลในเครื่องได้เมื่อเชื่อม LM Studio แล้ว ตอนนี้ยังมองหรือควบคุมหน้าจอไม่ได้ครับ</p>
+          <p>{aiEnabled ? 'พูดคุยกับโมเดลในเครื่องได้เมื่อเชื่อม LM Studio แล้ว ตอนนี้ยังมองหรือควบคุมหน้าจอไม่ได้ครับ' : 'Local AI ถูกปิดสำหรับ MIMIC แล้ว LM Studio และแอปอื่นยังทำงานตามปกติ'}</p>
         </div>
         {chatHistory.map((message) => <div key={message.id} className={'message ' + message.role}>
           {message.content}
@@ -301,7 +314,7 @@ export default function App() {
           rows={2}
           value={draft}
           onChange={(event) => setDraft(event.target.value)}
-          placeholder={canChat ? 'พิมพ์คุยกับ MIMIC...' : 'เชื่อม LM Studio และโหลดโมเดลเพื่อเริ่มแชต'}
+          placeholder={aiEnabled ? (canChat ? 'พิมพ์คุยกับ MIMIC...' : 'เชื่อม LM Studio และโหลดโมเดลเพื่อเริ่มแชต') : 'Local AI ถูกปิดใน MIMIC'}
           disabled={!canChat}
           aria-label="ข้อความถึง MIMIC"
         />
@@ -349,7 +362,7 @@ export default function App() {
     <main className="main-area">
       <header className="topbar">
         <div className="breadcrumbs"><span>MIMIC</span><ChevronRight size={15} /><strong>{view === 'home' ? 'Overview' : view === 'workspace' ? (project?.name ?? 'Projects') : view === 'teach' ? 'Teach Mode' : view === 'skills' ? 'Skill Library' : 'Settings'}</strong></div>
-        <div className="top-actions"><StatusPill connection={connection} /><span className="version-tag">v0.1 · UI Scaffold</span></div>
+        <div className="top-actions"><StatusPill connection={connection} /><button type="button" className={'ai-toggle ' + (aiEnabled ? 'on' : 'off')} onClick={toggleAi}>{aiEnabled ? 'AI On' : 'AI Off'}</button><span className="version-tag">v0.1 · UI Scaffold</span></div>
       </header>
 
       <div className="page-content">
@@ -426,10 +439,10 @@ export default function App() {
           <span className="section-eyebrow">CONFIGURATION</span><h1>Local AI Settings</h1><p>สำหรับ MIMIC v0.1 เชื่อมเฉพาะ LM Studio บนคอมพิวเตอร์ของคุณ ไม่ใช้ Cloud API</p>
           <section className="panel settings-panel">
             <div className="settings-title"><div className="settings-icon"><Cpu size={23} /></div><div><h3>LM Studio</h3><span>http://127.0.0.1:1234/v1</span></div><StatusPill connection={connection} /></div>
-            <div className="settings-row"><div><strong>Connection</strong><p>ตรวจสอบ Local Server และรายการโมเดล</p></div><button className="secondary-button" type="button" onClick={() => void refreshAi()} disabled={connection.phase === 'checking'}><RefreshCw size={16} /> Check connection</button></div>
+            <div className="settings-row"><div><strong>Connection</strong><p>ตรวจสอบ Local Server และรายการโมเดล</p></div><button className="secondary-button" type="button" onClick={() => void refreshAi()} disabled={!aiEnabled || connection.phase === 'checking'}><RefreshCw size={16} /> Check connection</button></div>
             {connection.phase === 'error' && <div className="inline-error" role="alert">{connection.reason}</div>}
             {connection.phase === 'browser' && <div className="information-box">นี่คือ Browser Preview — ให้รัน <code>npm run dev</code> บน Windows เพื่อเชื่อม LM Studio ผ่าน Desktop Backend</div>}
-            <div className="settings-row"><div><strong>Chat model</strong><p>เลือกจากโมเดลที่ LM Studio ส่งกลับมา</p></div><select aria-label="AI Model" value={model} disabled={!selectedModels.length} onChange={(event) => setModel(event.target.value)}><option value="">ยังไม่มีโมเดล</option>{selectedModels.map((item) => <option key={item} value={item}>{item}</option>)}</select></div>
+            <div className="settings-row"><div><strong>Chat model</strong><p>เลือกจากโมเดลที่ LM Studio ส่งกลับมา</p></div><select aria-label="AI Model" value={model} disabled={!aiEnabled || !selectedModels.length} onChange={(event) => setModel(event.target.value)}><option value="">ยังไม่มีโมเดล</option>{selectedModels.map((item) => <option key={item} value={item}>{item}</option>)}</select></div>
             <div className="settings-row"><div><strong>Screen capture & Automation</strong><p>สิทธิ์ควบคุมหน้าจอจะต้องได้รับการยืนยันจากผู้ใช้</p></div><span className="chip subtle"><LockKeyhole size={14} /> Disabled</span></div>
             <div className="settings-row"><div><strong>Speech input</strong><p>ไมโครโฟนและ Thai STT ยังไม่พร้อมใช้งาน</p></div><span className="chip subtle"><Mic size={14} /> Planned</span></div>
           </section>

@@ -45,6 +45,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .breadcrumbs { display:flex; gap:12px; align-items:center; color:#718bab; font-size:13px; }
 .breadcrumbs strong { color:#d6e5f9; font-weight:600; }
 .top-actions { display:flex; gap:14px; align-items:center; }
+.ai-toggle { border:1px solid #285440; border-radius:18px; padding:7px 11px; color:#a8e8c8; background:#123128; font-size:11px; font-weight:700; }
+.ai-toggle.off { color:#aebed1; background:#1a2738; border-color:#35465b; }
 .status-pill { display:inline-flex; align-items:center; gap:8px; color:#8babc9; font-size:11px; padding:8px 12px; border:1px solid #273b53; background:#101e32; border-radius:20px; white-space:nowrap; }
 .status-pill.online { color:#9ce5c6; border-color:#245341; background:#102c29; }
 .status-dot { width:7px; height:7px; display:inline-block; flex:0 0 7px; border-radius:50%; background:#8293ad; }

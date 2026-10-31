@@ -100,4 +100,5 @@ export type ConnectionState =
   | { phase: 'checking' }
   | { phase: 'ready'; status: AiStatus }
   | { phase: 'error'; reason: string }
+  | { phase: 'disabled' }
   | { phase: 'browser' };

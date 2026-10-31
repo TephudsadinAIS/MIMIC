@@ -8,6 +8,7 @@ Updated: 2026-10-31.
 - [x] Home, Projects, workspace, settings, Teach and Skill Library placeholders
 - [x] Project metadata create/select in localStorage (no credentials)
 - [x] LM Studio model list / Thai text-chat command implementation (source only)
+- [x] Per-app Local AI toggle: disables MIMIC chat and local model requests without stopping the shared LM Studio server or other local applications.
 - [x] Documentation for setup, architecture, and Phase 0
 
 ## Milestone A — Native automation harness (not exposed in product UI)
