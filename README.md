@@ -24,7 +24,7 @@
 
 ## 🎯 Immediate milestone — MIMIC v0.1 (No AI Automation)
 
-**We are implementing deterministic Windows desktop automation before AI teaching.** The application should launch an explicitly allowed EXE, locate known UI states, take scoped actions, verify the result, and stop when a screen is unexpected — **without opening LM Studio**. The first target is a controlled demo application, not a commercial game.
+**We are implementing deterministic Windows desktop automation before AI teaching.** **The core must also work on a different Windows machine with no local AI, model, GPU, or internet.** Account profiles are optional and user-configurable; six is merely an example, not a product limit. [Offline and portability requirements](docs/OFFLINE_PORTABILITY_REQUIREMENTS.md). The application should launch an explicitly allowed EXE, locate known UI states, take scoped actions, verify the result, and stop when a screen is unexpected — **without opening LM Studio**. The first target is a controlled demo application, not a commercial game.
 
 **Development handoff:** [Automation MVP specification](docs/AUTOMATION_MVP_V01.md) · [Workflow contract](docs/WORKFLOW_CONTRACT_V01.md) · [Prompt for Gemini](docs/PROMPT_GEMINI_AUTOMATION_V01.md)
 
