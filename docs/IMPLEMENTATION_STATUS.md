@@ -2,6 +2,8 @@
 
 Updated: 2026-10-31.
 
+For a user-facing, complete current-capabilities guide, read [CURRENT_CAPABILITIES.md](CURRENT_CAPABILITIES.md).
+
 ## Committed source / configuration
 - [x] React + TypeScript + Vite frontend scaffold
 - [x] Tauri 2 native Rust shell configuration and narrow commands
