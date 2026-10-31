@@ -8,7 +8,7 @@ import {
 import type { AiStatus, ChatMessage, ConnectionState, Project, ProjectTarget, TargetWindow, View, WorkflowRunEvent, WorkflowRunPhase, WorkflowStep } from './types';
 import { advanceDemoTarget, listTargetWindows, observeDemoTarget, requestEmergencyStop, startDemoTarget } from './services/automation';
 import { chatWithLocalAi, checkLocalAi, isDesktop } from './services/localAi';
-import { createControlledDemoTarget, createDemoWorkflow, loadProjects, saveProjects } from './services/projectStore';
+import { createApplicationTarget, createDemoWorkflow, loadProjects, saveProjects } from './services/projectStore';
 
 const newId = () => crypto.randomUUID();
 
@@ -61,7 +61,7 @@ export default function App() {
   const [targetWindowId, setTargetWindowId] = useState<number | null>(null);
   const [permissionGranted, setPermissionGranted] = useState(false);
   const [automationBusy, setAutomationBusy] = useState(false);
-  const [automationMessage, setAutomationMessage] = useState('เริ่ม Demo Target แล้วเลือกหน้าต่างที่แสดงในรายการ');
+  const [automationMessage, setAutomationMessage] = useState('กำหนด EXE และเงื่อนไขหน้าต่างก่อนเริ่มสร้าง workflow');
   const [runPhase, setRunPhase] = useState<WorkflowRunPhase>('idle');
   const [runStepId, setRunStepId] = useState<string | null>(null);
   const [runEvents, setRunEvents] = useState<WorkflowRunEvent[]>([]);
@@ -173,11 +173,6 @@ export default function App() {
 
   async function runWorkflow() {
     if (!project || targetWindowId === null || !permissionGranted || automationBusy) return;
-    if (project.target.kind !== 'controlled-demo') {
-      setRunPhase('failed');
-      setAutomationMessage('Configured applications are saved for future execution, but the native adapter is not implemented yet. No action was taken.');
-      return;
-    }
     runControl.current = { stopped: false, paused: false };
     setAutomationBusy(true); setRunPhase('running'); setRunEvents([]);
     try {
@@ -251,7 +246,7 @@ export default function App() {
       description: projectDescription.trim().slice(0, 200),
       createdAt: new Date().toISOString(),
       workflow: createDemoWorkflow(newId()),
-      target: createControlledDemoTarget(),
+      target: createApplicationTarget(),
       credentialRefs: [],
     };
     setProjects((current) => [next, ...current]);
@@ -404,21 +399,20 @@ export default function App() {
         {view === 'workspace' && (project ? <>
           <div className="workspace-title"><div><span className="section-eyebrow">PROJECT WORKSPACE</span><h1>{project.name}</h1><p>{project.description || 'กำหนด workflow ที่ตรวจสอบผลก่อนทำขั้นถัดไป'}</p></div><span className="chip subtle">Workflow saved locally</span></div>
           <div className="workspace-toolbar">
-            <button type="button" className="toolbar-primary" onClick={() => void launchDemo()} disabled={automationBusy || project.target.kind !== 'controlled-demo'}><Monitor size={17} /> Start Demo Target</button>
-            <button type="button" onClick={() => void refreshWindows()} disabled={automationBusy || project.target.kind !== 'controlled-demo'}><RefreshCw size={16} /> Refresh windows</button>
-            <button type="button" onClick={() => void runWorkflow()} disabled={automationBusy || project.target.kind !== 'controlled-demo' || targetWindowId === null || !permissionGranted}><Play size={16} /> Run workflow</button>
+            <button type="button" className="toolbar-primary" onClick={() => void launchDemo()} disabled title="Native application launcher is not implemented yet"><Monitor size={17} /> Launch application</button>
+            <button type="button" onClick={() => void refreshWindows()} disabled title="Native window detector is not implemented yet"><RefreshCw size={16} /> Detect target window</button>
+            <button type="button" onClick={() => void runWorkflow()} disabled title="The real application executor is not implemented yet"><Play size={16} /> Run workflow</button>
             <button type="button" onClick={pauseOrResumeWorkflow} disabled={runPhase !== 'running' && runPhase !== 'paused'}>{runPhase === 'paused' ? 'Resume' : 'Pause'}</button>
             <button type="button" className="emergency-button" onClick={() => void emergencyStop()}><Square size={15} /> Emergency Stop</button>
-            <span className="toolbar-note"><LockKeyhole size={15} /> {project.target.kind === 'controlled-demo' ? 'Demo only · no AI · no global mouse input' : 'Configured application · execution disabled'}</span>
+            <span className="toolbar-note"><LockKeyhole size={15} /> Real application setup · execution not enabled yet</span>
           </div>
           <div className="workspace-grid">
             <section className="panel skill-panel workflow-panel"><div className="panel-heading"><div><span className="section-eyebrow">WORKFLOW BUILDER</span><h3><WandSparkles size={18} /> {project.workflow.name}</h3></div><button className="text-button" type="button" onClick={addWorkflowStep}>+ Add step</button></div>
-              <div className="application-scope"><span className="section-eyebrow">APPLICATION SCOPE</span><select aria-label="Project target kind" value={project.target.kind} onChange={(event) => updateProjectTarget({ kind: event.target.value as ProjectTarget['kind'] })}><option value="controlled-demo">Controlled MIMIC Demo</option><option value="configured-application">Configured Windows application</option></select>{project.target.kind === 'configured-application' && <><label>Executable path (saved only)<input aria-label="Executable path" value={project.target.executablePath} maxLength={1024} placeholder="C:\\Path\\To\\YourApp.exe" onChange={(event) => updateProjectTarget({ executablePath: event.target.value })}/></label><label>Required window title text<input aria-label="Required window title text" value={project.target.windowTitleContains} maxLength={200} placeholder="e.g. My Application" onChange={(event) => updateProjectTarget({ windowTitleContains: event.target.value })}/></label><p className="scope-warning">This configuration is not executable yet. MIMIC will not launch, inspect, or send input to this application in v0.1.</p></>}<p>Secret values are never stored in this project. Future type-secret steps will use an opaque Windows Credential Manager reference.</p></div>
+              <div className="application-scope"><span className="section-eyebrow">APPLICATION SCOPE</span><label>Executable path<input aria-label="Executable path" value={project.target.executablePath} maxLength={1024} placeholder="C:\\Path\\To\\YourApp.exe" onChange={(event) => updateProjectTarget({ executablePath: event.target.value })}/></label><label>Required window title text<input aria-label="Required window title text" value={project.target.windowTitleContains} maxLength={200} placeholder="e.g. My Application" onChange={(event) => updateProjectTarget({ windowTitleContains: event.target.value })}/></label><p className="scope-warning">Real target setup is saved locally. Launching, detection, and input are intentionally unavailable until the native adapter is implemented.</p><p>Secret values are never stored in this project. Future type-secret steps will use an opaque Windows Credential Manager reference.</p></div>
               <div className="workflow-steps">{project.workflow.steps.map((step, index) => <div className={'workflow-step ' + (step.id === runStepId ? 'active' : '')} key={step.id}><strong>{index + 1}</strong><div><input aria-label={`Step ${index + 1} title`} value={step.title} maxLength={60} onChange={(event) => updateWorkflowStep(step.id, { title: event.target.value })}/><select aria-label={`Step ${index + 1} action`} value={step.kind} onChange={(event) => updateWorkflowStep(step.id, { kind: event.target.value as WorkflowStep['kind'] })}><option value="wait-for-state">Wait for state</option><option value="advance">Verify & advance</option></select><select aria-label={`Step ${index + 1} expected state`} value={step.expectedState} onChange={(event) => updateWorkflowStep(step.id, { expectedState: event.target.value as WorkflowStep['expectedState'] })}><option value="login">Login</option><option value="server">Server</option><option value="ready">Ready</option></select><span className="step-settings"><label>Timeout ms<input type="number" min="1000" max="60000" value={step.timeoutMs} onChange={(event) => updateWorkflowStep(step.id, { timeoutMs: Math.max(1000, Number(event.target.value) || 1000) })}/></label><label>Retries<input type="number" min="1" max="5" value={step.maxAttempts} onChange={(event) => updateWorkflowStep(step.id, { maxAttempts: Math.max(1, Math.min(5, Number(event.target.value) || 1)) })}/></label></span></div><div className="step-actions"><button type="button" onClick={() => moveWorkflowStep(step.id, -1)} disabled={index === 0}>↑</button><button type="button" onClick={() => moveWorkflowStep(step.id, 1)} disabled={index === project.workflow.steps.length - 1}>↓</button><button type="button" onClick={() => removeWorkflowStep(step.id)} disabled={project.workflow.steps.length <= 1}>×</button></div></div>)}</div>
-              {project.target.kind === 'controlled-demo' && <div className="target-picker"><p>เลือกหน้าต่าง Demo แล้วอนุญาตก่อน Run. ขั้นตอนด้านบนจะถูกบันทึกไว้ในเครื่องอัตโนมัติ แต่ยังใช้ได้กับ Controlled Demo เท่านั้น</p><select aria-label="Target window" value={targetWindowId ?? ''} onChange={(event) => setTargetWindowId(event.target.value ? Number(event.target.value) : null)}><option value="">Select a window…</option>{targetWindows.filter((window) => window.isDemo).map((window) => <option key={window.id} value={window.id}>Demo · {window.title} (PID {window.processId})</option>)}</select><label className="permission-check"><input type="checkbox" checked={permissionGranted} onChange={(event) => setPermissionGranted(event.target.checked)} /> I allow this Demo Window for this run</label></div>}
             </section>
             <section className="panel screen-panel"><div className="panel-heading"><div><span className="section-eyebrow">OBSERVE → ACT → VERIFY</span><h3><Monitor size={18} /> Automation monitor</h3></div><span className={'chip ' + (runPhase === 'completed' ? '' : 'subtle')}>{runPhase}</span></div>
-              <div className="screen-placeholder"><div className="screen-art"><Monitor size={51} strokeWidth={1.25} /><span className="screen-glint" /></div><h3>{runPhase === 'completed' ? 'Workflow completed' : 'Controlled Demo only'}</h3><p>{automationMessage}</p><div className="demo-flow"><span>Login</span><ArrowRight size={14} /><span>Server</span><ArrowRight size={14} /><span>Ready</span></div><div className="run-log" aria-live="polite">{runEvents.length ? runEvents.map((event, index) => <p key={`${event.at}-${index}`}><time>{event.at}</time> {event.message}</p>) : <p>No run events yet.</p>}</div></div>
+              <div className="screen-placeholder"><div className="screen-art"><Monitor size={51} strokeWidth={1.25} /><span className="screen-glint" /></div><h3>{runPhase === 'completed' ? 'Workflow completed' : 'Set up your application'}</h3><p>{automationMessage}</p><div className="demo-flow"><span>Launch</span><ArrowRight size={14} /><span>Observe</span><ArrowRight size={14} /><span>Verify</span></div><div className="run-log" aria-live="polite">{runEvents.length ? runEvents.map((event, index) => <p key={`${event.at}-${index}`}><time>{event.at}</time> {event.message}</p>) : <p>No run events yet.</p>}</div></div>
               <div className="screen-status"><span><span className="status-dot" /> {runPhase}{targetWindowId ? ' · target selected' : ''}</span><span><LockKeyhole size={14} /> No screenshots stored</span></div>
             </section>
             {renderChat()}

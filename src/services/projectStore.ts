@@ -2,8 +2,8 @@ import type { CredentialReference, DemoState, Project, ProjectTarget, Workflow, 
 
 const STORAGE_KEY = 'mimic.project-metadata.v1';
 
-export function createControlledDemoTarget(): ProjectTarget {
-  return { kind: 'controlled-demo', executablePath: '', windowTitleContains: 'MIMIC Automation Demo' };
+export function createApplicationTarget(): ProjectTarget {
+  return { kind: 'configured-application', executablePath: '', windowTitleContains: '' };
 }
 
 export function createDemoWorkflow(id: string): Workflow {
@@ -18,12 +18,12 @@ export function createDemoWorkflow(id: string): Workflow {
   return {
     schemaVersion: 1,
     id: `${id}-workflow`,
-    name: 'Controlled Demo workflow',
+    name: 'New application workflow',
     steps: [
-      step('wait-login', 'Wait for Login', 'wait-for-state', 'login'),
-      step('advance-server', 'Continue to Server', 'advance', 'server'),
-      step('wait-server', 'Wait for Server selection', 'wait-for-state', 'server'),
-      step('advance-ready', 'Select Test Server', 'advance', 'ready'),
+      step('wait-window', 'Wait for target window', 'wait-for-state', 'login'),
+      step('verify-first', 'Verify first application state', 'advance', 'server'),
+      step('wait-next', 'Wait for next application state', 'wait-for-state', 'server'),
+      step('verify-ready', 'Verify completion state', 'advance', 'ready'),
     ],
   };
 }
@@ -50,9 +50,10 @@ function readWorkflow(value: unknown, projectId: string): Workflow {
 }
 
 function readTarget(value: unknown): ProjectTarget {
-  if (typeof value !== 'object' || value === null) return createControlledDemoTarget();
+  if (typeof value !== 'object' || value === null) return createApplicationTarget();
   const target = value as Partial<ProjectTarget>;
-  if (target.kind !== 'controlled-demo' && target.kind !== 'configured-application') return createControlledDemoTarget();
+  // Legacy controlled-demo projects migrate to a blank real-application setup.
+  if (target.kind !== 'configured-application') return createApplicationTarget();
   return {
     kind: target.kind,
     executablePath: typeof target.executablePath === 'string' ? target.executablePath.slice(0, 1024) : '',

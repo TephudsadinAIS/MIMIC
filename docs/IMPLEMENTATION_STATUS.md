@@ -10,16 +10,16 @@ Updated: 2026-10-31.
 - [x] LM Studio model list / Thai text-chat command implementation (source only)
 - [x] Documentation for setup, architecture, and Phase 0
 
-## Milestone A — Windows Automation Demo (implemented; Windows verification in progress)
+## Milestone A — Native automation harness (not exposed in product UI)
 - [x] Native Windows window enumeration exposed through narrow Tauri commands.
-- [x] Controlled native Demo Target: `Login → Server selection → Ready`, using synthetic data only.
-- [x] Explicit target selection and per-run permission checkbox in the MIMIC UI.
+- [x] Controlled native test target: `Login → Server selection → Ready`, using synthetic data only; retained only as a regression harness.
+- [x] Explicit target selection and per-run permission checks are implemented in the native harness, not exposed as a product workflow.
 - [x] Observe → Act → Verify command: validates the selected visible Demo window, its class, current state, and expected labeled control before issuing a window-scoped `BM_CLICK`; verifies the exact expected next state afterwards.
 - [x] Fail-closed behavior for a missing window, unexpected state, or missing control; no global mouse input, coordinates, screenshots, or credentials are used.
 - [x] Native Emergency Stop flag outside LM Studio and the automation action path.
-- [x] Controlled-demo Workflow Builder: local save/load, editable/reorderable `wait-for-state` and `advance` steps, per-step timeout/retry fields, and a run-event monitor.
-- [x] Controlled-demo runner: Run, Pause, Resume and Emergency Stop state handling, bounded attempt counts, and exact state verification after every action.
-- [x] Non-executable Project Target configuration: controlled demo vs. configured Windows application, optional executable path, and required window title; execution is visibly disabled for configured applications.
+- [x] Workflow Builder shell: local save/load, editable/reorderable steps, per-step timeout/retry fields, and a run-event monitor.
+- [x] Native harness runner: Run, Pause, Resume and Emergency Stop state handling, bounded attempt counts, and exact state verification after every action.
+- [x] Real application Project Target configuration: executable path and required window title; execution is visibly disabled until the generic native adapter exists.
 - [x] Workflow schema reserves generic locator and secret-reference types without persisting password values.
 - [ ] Generic target adapters, application picker/launcher, accessibility selectors, visual matching, and secure credential references (Milestone B/C; not implemented).
 - [ ] Optional sequential profile queue only after single-profile demo passes.

@@ -10,7 +10,7 @@ export interface Project {
   credentialRefs: CredentialReference[];
 }
 
-export type ProjectTargetKind = 'controlled-demo' | 'configured-application';
+export type ProjectTargetKind = 'configured-application';
 
 export interface ProjectTarget {
   kind: ProjectTargetKind;
