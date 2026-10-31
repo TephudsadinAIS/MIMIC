@@ -16,6 +16,7 @@ export interface ProjectTarget {
   kind: ProjectTargetKind;
   executablePath: string;
   windowTitleContains: string;
+  targetWindowId?: number | null;
 }
 
 // A vault key is only an opaque reference. It must never contain the secret itself.
@@ -27,28 +28,61 @@ export interface CredentialReference {
 }
 
 export type DemoState = 'login' | 'server' | 'ready';
-export type WorkflowStepKind =
-  | 'wait-for-state'
-  | 'advance'
-  | 'wait-for-window'
-  | 'click-uia'
-  | 'click-template'
-  | 'type-secret';
 
-export type Locator =
-  | { kind: 'window-title'; value: string }
-  | { kind: 'uia'; automationId: string; name: string; controlType: string }
-  | { kind: 'template'; assetId: string; threshold: number };
+export type ActionType =
+  | 'click'
+  | 'double-click'
+  | 'type-text'
+  | 'type-secret'
+  | 'press-key'
+  | 'wait-visible'
+  | 'wait-hidden'
+  | 'verify-state'
+  | 'launch-app'
+  | 'wait-for-state'
+  | 'advance';
+
+export type WorkflowStepKind = ActionType;
+
+export interface Locator {
+  kind: 'uia' | 'template' | 'window-title' | 'relative-point';
+  automationId?: string;
+  name?: string;
+  controlType?: string;
+  className?: string;
+  imageBase64?: string;
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  referenceWidth?: number;
+  referenceHeight?: number;
+  threshold?: number;
+  value?: string;
+}
+
+export interface ExpectedResultConfig {
+  kind: 'state' | 'element-visible' | 'element-hidden' | 'window-title';
+  expectedState?: DemoState | string;
+  locator?: Locator;
+  timeoutMs: number;
+}
 
 export interface WorkflowStep {
   id: string;
   title: string;
   kind: WorkflowStepKind;
-  expectedState: DemoState;
+  actionType?: ActionType;
+  expectedState?: DemoState | string;
+  expectedResult?: ExpectedResultConfig;
   timeoutMs: number;
   maxAttempts: number;
   locator?: Locator;
+  expectedLocator?: Locator;
   credentialRefId?: string;
+  text?: string;
+  secretRef?: string;
+  key?: string;
 }
 
 export interface Workflow {
@@ -64,6 +98,7 @@ export interface WorkflowRunEvent {
   stepId: string;
   message: string;
   at: string;
+  status?: 'info' | 'success' | 'warning' | 'error';
 }
 
 export interface AiStatus {
@@ -82,12 +117,39 @@ export interface TargetWindow {
   title: string;
   processId: number;
   isDemo: boolean;
+  exePath?: string;
+  rect?: [number, number, number, number];
 }
 
 export interface AutomationRunResult {
   status: 'verified' | 'completed' | 'stopped';
   message: string;
   targetWindowId: number;
+}
+
+export interface StepExecutionResult {
+  success: boolean;
+  status: 'verified' | 'completed' | 'failed' | 'stopped';
+  message: string;
+  targetWindowId: number;
+  attempts: number;
+  durationMs: number;
+}
+
+export interface SelectOnScreenResult {
+  cancelled: boolean;
+  mode: 'uia' | 'region' | 'cancelled';
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  windowId: number;
+  windowTitle: string;
+  elementName?: string;
+  controlType?: string;
+  automationId?: string;
+  className?: string;
+  imageBase64?: string;
 }
 
 export interface DemoObservation {

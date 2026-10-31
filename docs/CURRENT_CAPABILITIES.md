@@ -1,6 +1,6 @@
 # MIMIC — Current Capabilities
 
-Updated: 2026-10-31
+Updated: 2026-11-01 (Phase 1: Manual Teach & Select on Screen)
 
 This document describes the **actual current behavior** of MIMIC v0.1. It is not a product roadmap.
 
@@ -8,77 +8,74 @@ This document describes the **actual current behavior** of MIMIC v0.1. It is not
 
 ### Desktop application and updates
 
-- MIMIC is a Windows desktop application built with Tauri, React, and TypeScript.
-- A Windows NSIS installer can be built locally. Installing a newer installer updates the existing MIMIC application; project data in the app's local storage is retained.
-- Projects can be created and reopened. Each project stores only non-sensitive data locally: name, description, workflow definition, executable-path text, and target-window-title text.
+- MIMIC is a Windows desktop application built with Tauri, React, TypeScript, and Rust.
+- Windows NSIS installer or binary can be built locally.
+- Projects can be created, saved locally, and reopened.
+- Project metadata is retained across restarts in local storage.
 
-### Local AI chat (optional)
+### Application Scope & Launching
 
-- MIMIC can connect to an already-running LM Studio server at `http://127.0.0.1:1234`.
-- It lists the models exposed by that server and sends text chat to the selected model.
-- MIMIC can use the same loaded LM Studio model as another local application, such as MAVEN. A second model download or second model process is not required.
-- `AI On / AI Off` applies only to MIMIC:
-  - **AI On:** MIMIC may query the selected local model through LM Studio.
-  - **AI Off:** MIMIC disables its chat controls and stops initiating model requests.
-  - It does **not** stop LM Studio, unload the model, or affect MAVEN or another application using the same local server.
-- Closing MIMIC closes its own UI and request client. It does not shut down LM Studio.
+- **Browse EXE:** A native Windows Open File Dialog (`IFileOpenDialog`) allows browsing and picking `.exe` files directly.
+- **Launch Application:** Can launch the user-selected executable (or the built-in controlled demo window).
+- **Target Window Enumeration:** Enumerate visible open Windows windows with process ID, title, and bounding dimensions.
+- **Target Window Selection:** Dropdown selector maps the project's target application scope to an active window and automatically fills window title criteria.
+- **Permission Gate:** Enforces user authorization before automation inputs are transmitted. Fails closed if the target window is missing, closed, or out of scope.
 
-### Workflow editing and local storage
+### Manual Teach / Select on Screen
 
-- A project includes an editable workflow list.
-- Steps can be added, renamed, removed, and reordered.
-- Each step exposes action, expected-state, timeout, and retry fields.
-- Workflow changes save locally with the project.
-- A project has an **Application Scope** section with:
-  - executable path;
-  - required window-title text.
-- An opaque credential-reference type exists in the schema for future Windows Credential Manager integration. MIMIC does not store a password in project data, source files, or logs.
+- **Interactive Screen Overlay:** Clicking **Select on Screen** opens a native Windows transparent fullscreen overlay.
+- **Visual Highlight:** Hovering over target window controls (buttons, inputs) highlights the element with a bright border and floating HUD description.
+- **Accessibility & UI Automation:** Uses Windows UI Automation (`IUIAutomation`) to detect control types, names, automation IDs, and bounding rectangles.
+- **Image Region Selection:** Users can click to select an element directly, or drag a rectangular rubberband box to crop an image region for visual matching.
+- **Accidental Click Protection:** The overlay window intercepts all mouse clicks and keystrokes during selection mode, preventing accidental input to the target application.
+- **Cancel Support:** Pressing `ESC` or right-clicking immediately exits selection mode with no side effects.
+- **Visual Snippet Capture:** Selected elements or image regions automatically capture a base64 BMP image snippet for visual preview and verification in the Workflow Editor.
 
-### Native safety harness (developer-only)
+### Workflow Editor & Step Configuration
 
-- The repository contains a controlled native Windows automation harness used for regression checks: `Login → Server selection → Ready`.
-- It validates a known local test window, checks its expected control and next state, and fails closed on an unexpected state.
-- This harness is **not exposed in the MIMIC product UI** and is not a workflow for a user application.
+- **Step Configuration Modal:** Allows setting step title, action kind, target locator, parameters, expected result, timeout, and bounded retry policy (1–5 attempts).
+- **Supported Action Kinds:**
+  - `Click` — clicks element center or image region center
+  - `Double Click` — double clicks element
+  - `Type Text` — types non-sensitive text into focused or located edit control
+  - `Type Secret` — uses opaque OS vault reference (`vaultKey`); passwords are never stored in plaintext
+  - `Press Key` — sends virtual keys (`Enter`, `Tab`, `Esc`, `Space`, `Backspace`)
+  - `Wait Until Visible` — polls until target element/state appears
+  - `Wait Until Hidden` — polls until target element/state disappears
+  - `Verify State` — verifies window title or element condition
+  - `Launch Application` — opens target executable
+- **Expected Result (Postcondition):** Allows setting expected state (e.g. Login, Server selection, Ready) or picking a verification element on screen.
+- **Test Step:** Single-step execution button inside the modal and in the step list allows immediate verification of an action and its postcondition.
+- **Step Management:** Reorder steps (Up/Down), edit, delete, and add steps manually or via Select on Screen.
 
-## What is visible but not executable yet
+### Shared Deterministic Automation Engine
 
-These parts are intentionally shown as configuration or disabled controls. They do not claim to work.
+- **Offline & No AI Required:** The automation runner executes 100% locally using native Win32 & UI Automation APIs. LM Studio can be completely closed.
+- **Step Lifecycle:** Bounded retry, precondition check, action execution, and postcondition verification.
+- **Execution Controls:** Run full workflow, Pause, Resume, Stop, and Emergency Stop.
+- **Emergency Stop:** Immediate atomic stop halts execution and prevents any further Windows input.
+- **Real-Time Monitor:** Color-coded event log with timestamps and status updates (`verified`, `completed`, `warning`, `error`).
 
-- Entering an executable path does not launch that application.
-- Required window-title text is saved, but MIMIC does not yet locate or inspect that external window.
-- `Run workflow`, target-window detection, and generic application launching are disabled until the native generic Windows adapter exists.
-- Workflow step actions are not yet connected to Windows UI Automation, image/template matching, mouse input, keyboard input, or a Windows Credential Manager lookup.
-- Run Monitor events currently apply only to the developer-native harness, not an external application.
+### Controlled Demo Target
 
-## Not implemented
+- Built-in multi-stage demo window (`MimicAutomationDemoTarget`) simulating Login (username edit, password edit, continue button) → Server selection → Ready.
+- Can be used for end-to-end testing of Select on Screen, clicking, typing, and verification without touching commercial applications or games.
 
-- File picker for selecting an EXE.
-- General Windows application launcher and process/window allowlist.
-- Windows UI Automation selectors for buttons, fields, or menus.
-- Screen capture, OCR, template/image matching, or OpenCV.
-- User teaching/recording mode.
-- Secure account-profile editor and Windows Credential Manager integration.
-- Typing credentials or any other secret into an application.
-- General workflow execution, pause/resume/stop for external applications, and a system-wide emergency-stop hotkey.
-- Sequential account queue / Run All.
-- AI screen understanding, local VLM, voice, cloud AI, or background agent execution.
+### Local AI Chat (Optional)
 
-## Current use instructions
+- MIMIC can optionally connect to an already-running LM Studio server at `http://127.0.0.1:1234`.
+- AI features are completely decoupled from the automation engine.
 
-1. Install and open MIMIC.
-2. Create or open a Project.
-3. In **Application Scope**, enter the intended EXE path and expected window-title text. This is saved locally for the project.
-4. Optionally open **Settings** and use the local AI chat if LM Studio is already running with a model.
-5. Use `AI On / AI Off` to control only MIMIC's use of LM Studio.
+## Not implemented yet / Next phases
 
-At this stage, the project setup is a saved configuration. It does not automate the target application yet.
+- Windows Credential Manager OS vault backend integration (v0.1 uses opaque synthetic reference schema).
+- Sequential multi-account profile queue (Phase 2).
+- Project Export / Import with remapping wizard.
+- AI screen interpretation / VLM assisted authoring (planned for Phase 3).
+- Live-game automation (Yulgang W or commercial targets require prior terms and anti-cheat feasibility reviews).
 
-## Game-specific boundary
+## Security and Privacy Verification
 
-MIMIC does not currently launch, log in to, click through, or automate Yulgang W or any other game. Before considering a real-game workflow, its Terms of Service, anti-cheat behavior, and permitted automation scope must be checked. MIMIC will not bypass anti-cheat, CAPTCHA, authentication protections, or service restrictions.
-
-## Privacy and data
-
-- MIMIC is local-first. It does not send screen captures or project data to cloud services.
-- Local AI chat is sent only to the local LM Studio endpoint when AI is enabled.
-- Passwords must not be entered into project fields. Future secret use must rely on Windows Credential Manager references rather than plain text.
+- No cloud APIs, telemetry, or remote dependencies.
+- No plaintext passwords in project JSON, source files, or logs.
+- Overlay captures only upon user command and redacts sensitive field typing.

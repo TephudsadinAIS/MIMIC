@@ -71,7 +71,6 @@ async fn ai_chat(model: String, messages: Vec<ChatMessage>) -> Result<String, St
         return Err("รูปแบบข้อความไม่ถูกต้อง".into());
     }
 
-    // User text only. Never allow a message to override the system role.
     let mut prompt = vec![json!({
         "role": "system",
         "content": "คุณคือ MIMIC ผู้ช่วย AI ส่วนตัวในเครื่อง ตอบภาษาไทยอย่างกระชับ ให้ข้อมูลตามจริง ไม่มีสิทธิ์มองหน้าจอหรือควบคุมคอมพิวเตอร์ในเวอร์ชันนี้ และห้ามอ้างว่าได้ทำงานจริงถ้ายังไม่ได้ทำ"
@@ -136,6 +135,41 @@ fn automation_emergency_stop() -> automation::DemoRunResult {
     automation::emergency_stop()
 }
 
+#[tauri::command]
+fn automation_reset_emergency_stop() {
+    automation::reset_emergency_stop();
+}
+
+#[tauri::command]
+fn automation_pick_executable() -> Result<Option<String>, String> {
+    automation::pick_executable()
+}
+
+#[tauri::command]
+fn automation_launch_application(executable_path: String) -> Result<u32, String> {
+    automation::launch_application(&executable_path)
+}
+
+#[tauri::command]
+fn automation_focus_window(target_window_id: isize) -> Result<(), String> {
+    automation::focus_window(target_window_id)
+}
+
+#[tauri::command]
+fn automation_select_on_screen(
+    target_window_id: Option<isize>,
+) -> Result<automation::SelectOnScreenResult, String> {
+    automation::select_on_screen(target_window_id)
+}
+
+#[tauri::command]
+fn automation_execute_step(
+    target_window_id: isize,
+    step: automation::StepExecutionPayload,
+) -> Result<automation::StepExecutionResult, String> {
+    automation::execute_step(target_window_id, step)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -147,6 +181,12 @@ pub fn run() {
             automation_advance_demo,
             automation_observe_demo,
             automation_emergency_stop,
+            automation_reset_emergency_stop,
+            automation_pick_executable,
+            automation_launch_application,
+            automation_focus_window,
+            automation_select_on_screen,
+            automation_execute_step,
         ])
         .run(tauri::generate_context!())
         .expect("error while running MIMIC");
