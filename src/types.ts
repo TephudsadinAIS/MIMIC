@@ -18,6 +18,19 @@ export interface ChatMessage {
   content: string;
 }
 
+export interface TargetWindow {
+  id: number;
+  title: string;
+  processId: number;
+  isDemo: boolean;
+}
+
+export interface AutomationRunResult {
+  status: 'verified' | 'completed' | 'stopped';
+  message: string;
+  targetWindowId: number;
+}
+
 export type ConnectionState =
   | { phase: 'checking' }
   | { phase: 'ready'; status: AiStatus }

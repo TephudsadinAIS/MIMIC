@@ -2,10 +2,11 @@ import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import {
   Activity, ArrowRight, BookOpen, Bot, Check, ChevronRight, CircleHelp,
   Cpu, Database, Eye, FolderOpen, Home, LockKeyhole,
-  Mic, Monitor, MoreHorizontal, Pause, Play, Plus, RefreshCw, Send,
+  Mic, Monitor, Play, Plus, RefreshCw, Send,
   Settings2, ShieldCheck, Sparkles, Square, Video, WandSparkles, X,
 } from 'lucide-react';
-import type { AiStatus, ChatMessage, ConnectionState, Project, View } from './types';
+import type { AiStatus, AutomationRunResult, ChatMessage, ConnectionState, Project, TargetWindow, View } from './types';
+import { advanceDemoTarget, listTargetWindows, requestEmergencyStop, startDemoTarget } from './services/automation';
 import { chatWithLocalAi, checkLocalAi, isDesktop } from './services/localAi';
 import { loadProjects, saveProjects } from './services/projectStore';
 
@@ -56,6 +57,12 @@ export default function App() {
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
   const [chatError, setChatError] = useState('');
+  const [targetWindows, setTargetWindows] = useState<TargetWindow[]>([]);
+  const [targetWindowId, setTargetWindowId] = useState<number | null>(null);
+  const [permissionGranted, setPermissionGranted] = useState(false);
+  const [automationBusy, setAutomationBusy] = useState(false);
+  const [automationMessage, setAutomationMessage] = useState('เริ่ม Demo Target แล้วเลือกหน้าต่างที่แสดงในรายการ');
+  const [automationResult, setAutomationResult] = useState<AutomationRunResult | null>(null);
 
   const project = projects.find((item) => item.id === selectedId) ?? null;
   const selectedModels: string[] = connection.phase === 'ready' ? connection.status.models : [];
@@ -79,6 +86,57 @@ export default function App() {
 
   useEffect(() => { saveProjects(projects); }, [projects]);
   useEffect(() => { void refreshAi(); }, [refreshAi]);
+
+  async function refreshWindows() {
+    try {
+      const windows = await listTargetWindows();
+      setTargetWindows(windows);
+      setTargetWindowId((current) => windows.some((window) => window.id === current) ? current : null);
+      setAutomationMessage(windows.length ? 'เลือกเฉพาะ Demo Target ที่ต้องการอนุญาต' : 'ไม่พบหน้าต่างที่เลือกได้');
+    } catch (error) {
+      setAutomationMessage(String(error));
+    }
+  }
+
+  async function launchDemo() {
+    setAutomationBusy(true);
+    setAutomationResult(null);
+    try {
+      await startDemoTarget();
+      await refreshWindows();
+      setAutomationMessage('Demo Target พร้อมแล้ว — เลือกหน้าต่าง MIMIC Automation Demo และทำเครื่องหมายอนุญาต');
+    } catch (error) {
+      setAutomationMessage(String(error));
+    } finally {
+      setAutomationBusy(false);
+    }
+  }
+
+  async function advanceDemo() {
+    if (targetWindowId === null || !permissionGranted) return;
+    setAutomationBusy(true);
+    setAutomationResult(null);
+    try {
+      const result = await advanceDemoTarget(targetWindowId, permissionGranted);
+      setAutomationResult(result);
+      setAutomationMessage(result.message);
+      await refreshWindows();
+    } catch (error) {
+      setAutomationMessage(String(error));
+    } finally {
+      setAutomationBusy(false);
+    }
+  }
+
+  async function emergencyStop() {
+    try {
+      const result = await requestEmergencyStop();
+      setAutomationResult(result);
+      setAutomationMessage(result.message);
+    } catch (error) {
+      setAutomationMessage(String(error));
+    }
+  }
 
   function openProject(nextId: string) {
     setSelectedId(nextId);
@@ -110,7 +168,7 @@ export default function App() {
     if (!message || !canChat) return;
     const nextHistory: ChatMessage[] = [
       ...chatHistory,
-      { id: newId(), role: 'user', content: message },
+      { id: newId(), role: 'user' as const, content: message },
     ].slice(-12);
     setChatHistory(nextHistory);
     setDraft('');
@@ -247,17 +305,19 @@ export default function App() {
         {view === 'workspace' && (project ? <>
           <div className="workspace-title"><div><span className="section-eyebrow">PROJECT WORKSPACE</span><h1>{project.name}</h1><p>{project.description || 'แยกการสนทนาและทักษะตามโปรเจกต์'}</p></div><span className="chip subtle">Project metadata only</span></div>
           <div className="workspace-toolbar">
-            <button type="button" className="toolbar-primary" disabled title="Teach Mode ยังไม่ได้พัฒนา"><Video size={17} /> Start Teaching</button>
-            <button type="button" disabled title="ยังไม่มีระบบรัน Skill"><Play size={16} /> Play Skill</button>
-            <button type="button" disabled title="ยังไม่มีระบบรัน Skill"><Pause size={16} /> Pause</button>
-            <button type="button" disabled title="ยังไม่มีระบบรัน Skill"><Square size={15} /> Stop</button>
-            <span className="toolbar-note"><LockKeyhole size={15} /> Automation disabled in scaffold</span>
+            <button type="button" className="toolbar-primary" onClick={() => void launchDemo()} disabled={automationBusy}><Monitor size={17} /> Start Demo Target</button>
+            <button type="button" onClick={() => void refreshWindows()} disabled={automationBusy}><RefreshCw size={16} /> Refresh windows</button>
+            <button type="button" onClick={() => void advanceDemo()} disabled={automationBusy || targetWindowId === null || !permissionGranted}><Play size={16} /> Verify & Advance</button>
+            <button type="button" className="emergency-button" onClick={() => void emergencyStop()}><Square size={15} /> Emergency Stop</button>
+            <span className="toolbar-note"><LockKeyhole size={15} /> Demo only · no AI · no global mouse input</span>
           </div>
           <div className="workspace-grid">
-            <section className="panel skill-panel"><div className="panel-heading"><div><span className="section-eyebrow">WORKFLOWS</span><h3><WandSparkles size={18} /> Skills</h3></div><MoreHorizontal size={18} /></div><EmptyFeature icon={BookOpen} title="No skills yet" description="เมื่อระบบ Teaching พร้อมใช้งาน ทักษะที่ตรวจสอบแล้วจะอยู่ตรงนี้" /></section>
-            <section className="panel screen-panel"><div className="panel-heading"><div><span className="section-eyebrow">OBSERVATION</span><h3><Monitor size={18} /> Live Screen</h3></div><span className="chip subtle">Not capturing</span></div>
-              <div className="screen-placeholder"><div className="screen-art"><Monitor size={51} strokeWidth={1.25} /><span className="screen-glint" /></div><h3>Screen preview is not active</h3><p>Phase 0 จะทดสอบการเลือกหน้าต่างและจับภาพก่อน ไม่เก็บภาพโดยไม่ได้รับอนุญาต</p><button type="button" disabled className="secondary-button"><Eye size={16} /> Select window (planned)</button></div>
-              <div className="screen-status"><span><span className="status-dot" /> No screen access</span><span><LockKeyhole size={14} /> Local privacy</span></div>
+            <section className="panel skill-panel"><div className="panel-heading"><div><span className="section-eyebrow">WINDOW SCOPE</span><h3><WandSparkles size={18} /> Target permission</h3></div><ShieldCheck size={18} /></div>
+              <div className="target-picker"><p>เลือกหน้าต่างด้วยตัวเองก่อน MIMIC จะส่งคำสั่งใด ๆ</p><select aria-label="Target window" value={targetWindowId ?? ''} onChange={(event) => setTargetWindowId(event.target.value ? Number(event.target.value) : null)}><option value="">Select a window…</option>{targetWindows.map((window) => <option key={window.id} value={window.id}>{window.isDemo ? 'Demo · ' : ''}{window.title} (PID {window.processId})</option>)}</select><label className="permission-check"><input type="checkbox" checked={permissionGranted} onChange={(event) => setPermissionGranted(event.target.checked)} /> I allow this Demo Window for this run</label><span className="chip subtle">Only known Demo states can advance</span></div>
+            </section>
+            <section className="panel screen-panel"><div className="panel-heading"><div><span className="section-eyebrow">OBSERVE → ACT → VERIFY</span><h3><Monitor size={18} /> Automation monitor</h3></div><span className={'chip ' + (automationResult?.status === 'completed' ? '' : 'subtle')}>{automationResult?.status ?? 'Idle'}</span></div>
+              <div className="screen-placeholder"><div className="screen-art"><Monitor size={51} strokeWidth={1.25} /><span className="screen-glint" /></div><h3>{automationResult?.status === 'completed' ? 'Demo is Ready' : 'Controlled Demo only'}</h3><p>{automationMessage}</p><div className="demo-flow"><span>Login</span><ArrowRight size={14} /><span>Server</span><ArrowRight size={14} /><span>Ready</span></div></div>
+              <div className="screen-status"><span><span className="status-dot" /> {targetWindowId ? 'Target selected' : 'No target selected'}</span><span><LockKeyhole size={14} /> No screenshots stored</span></div>
             </section>
             {renderChat()}
           </div>

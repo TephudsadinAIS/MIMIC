@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Base desktop window capabilities; AI operations are explicitly exposed as narrow Rust commands.","local":true,"windows":["main"],"permissions":["core:default"]}}

@@ -1,3 +1,5 @@
+mod automation;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -106,10 +108,40 @@ async fn ai_chat(model: String, messages: Vec<ChatMessage>) -> Result<String, St
         .ok_or_else(|| "โมเดลไม่ได้ส่งข้อความตอบกลับ".to_string())
 }
 
+#[tauri::command]
+fn automation_list_windows() -> Result<Vec<automation::WindowInfo>, String> {
+    automation::list_windows()
+}
+
+#[tauri::command]
+fn automation_start_demo() -> Result<(), String> {
+    automation::start_demo()
+}
+
+#[tauri::command]
+fn automation_advance_demo(
+    target_window_id: isize,
+    permission_granted: bool,
+) -> Result<automation::DemoRunResult, String> {
+    automation::advance_demo(target_window_id, permission_granted)
+}
+
+#[tauri::command]
+fn automation_emergency_stop() -> automation::DemoRunResult {
+    automation::emergency_stop()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![ai_status, ai_chat])
+        .invoke_handler(tauri::generate_handler![
+            ai_status,
+            ai_chat,
+            automation_list_windows,
+            automation_start_demo,
+            automation_advance_demo,
+            automation_emergency_stop,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running MIMIC");
 }

@@ -105,11 +105,19 @@ h1, h2, h3, p { overflow-wrap:anywhere; }
 .workspace-toolbar { display:flex; align-items:center; gap:9px; padding:12px 15px; margin-bottom:18px; background:#101d2f; border:1px solid #263953; border-radius:12px; flex-wrap:wrap; }
 .workspace-toolbar button { display:flex; align-items:center; gap:7px; color:#d7e8fc; font-size:11px; font-weight:700; padding:10px 12px; border:1px solid #304661; border-radius:8px; background:#1b2c43; }
 .workspace-toolbar .toolbar-primary { background:#2b80e9; color:#fff; }
+.workspace-toolbar .emergency-button { background:#592735; border-color:#a44d61; color:#ffd5dc; }
+.workspace-toolbar .emergency-button:hover { background:#713142; }
 .toolbar-note { display:flex; align-items:center; gap:7px; margin-left:auto; color:#7896b7; font-size:10px; }
 .workspace-grid { display:grid; grid-template-columns:minmax(165px,.7fr) minmax(330px,1.7fr) minmax(280px,1fr); gap:14px; align-items:stretch; min-height:540px; }
 .panel { background:#101d30; border:1px solid #273c57; border-radius:15px; min-width:0; overflow:hidden; }
 .panel-heading { display:flex; align-items:center; justify-content:space-between; min-height:83px; padding:18px; border-bottom:1px solid #24344b; color:#6e8daf; }
 .panel-heading h3 { display:flex; gap:8px; align-items:center; margin:8px 0 0; font-size:14px; color:#e5f1ff; }
+.target-picker { padding:18px; display:grid; gap:14px; align-content:start; }
+.target-picker p { margin:0; color:#8ca6c3; font-size:11px; line-height:1.7; }
+.target-picker select { width:100%; color:#dbeafa; background:#0c192c; border:1px solid #3a5270; border-radius:9px; padding:10px; font-size:11px; }
+.permission-check { display:flex; align-items:flex-start; gap:9px; color:#c9d8ea; font-size:11px; line-height:1.5; }
+.permission-check input { margin:2px 0 0; accent-color:#2e8bf5; }
+.demo-flow { display:flex; align-items:center; justify-content:center; gap:9px; color:#79baff; font-size:11px; font-weight:700; }
 .empty-feature { min-height:245px; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; gap:12px; padding:22px; }
 .empty-feature-icon { display:grid; place-items:center; width:64px; height:64px; border-radius:18px; background:#192d48; color:#599ce7; }
 .empty-feature strong { color:#d6e8ff; font-size:14px; }
