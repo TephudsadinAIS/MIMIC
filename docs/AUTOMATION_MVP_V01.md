@@ -1,6 +1,6 @@
 # MIMIC v0.1 — Automation First (No AI Required)
 
-> **Current priority, 31 Oct 2026:** Build a working Windows **deterministic automation** MVP using the existing desktop application scaffold. Keep LM Studio integration optional and OFF by default. This document overrides the older AI-first ordering in \`MIMIC_PROJECT_OVERVIEW.md\` and \`docs/PHASE_0_CHECKLIST.md\` for the first delivery.
+> **Current priority, 31 Oct 2026:** Build a working Windows **deterministic automation** MVP using the existing desktop application scaffold. Keep LM Studio integration optional and OFF by default. This document overrides the older AI-first ordering in `MIMIC_PROJECT_OVERVIEW.md` and `docs/PHASE_0_CHECKLIST.md` for the first delivery.
 >
 > **Important:** This is a build specification, NOT proof that the game is automatable or that the implementation is finished.
 
@@ -66,7 +66,7 @@ Once this works, test the same abstractions against a *permitted* game launcher.
 
 Preserve the current **Tauri 2 + React + TypeScript** shell for the first experiment unless a demonstrated Windows limitation requires change. Use a native automation service, not browser-only JavaScript, for Windows window enumeration/input. Keep the implementation behind explicit typed commands:
 
-\`\`\`text
+```text
 React UI
   ├─ Project / Workflow Editor
   ├─ Run Monitor
@@ -80,7 +80,7 @@ React UI
                 ↳ controlled target application
 
 Optional later: AI Provider Adapter → LM Studio (not in automation execution path)
-\`\`\`
+```
 
 Use an adapter for native Windows APIs. Prefer Windows UI Automation for desktop controls; for game-rendered canvases UIA may expose nothing, requiring scoped screenshot matching. Compare options with small tests instead of picking a computer-vision stack solely on preference. Never inject into or modify the game process, bypass protections, or intercept network traffic.
 
@@ -141,10 +141,10 @@ Do not treat a fixed delay as proof of success. Do not activate input when the t
 
 ## 8. Order of authority for v0.1
 
-1. \`AGENTS.md\` — agent behavior and safety.
+1. `AGENTS.md` — agent behavior and safety.
 2. **This document** — immediate build scope and acceptance criteria.
-3. \`docs/WORKFLOW_CONTRACT_V01.md\` — tentative workflow representation.
-4. \`docs/ARCHITECTURE.md\` — repository structure and adapters.
-5. \`MIMIC_PROJECT_OVERVIEW.md\` — long-term AI teaching vision.
+3. `docs/WORKFLOW_CONTRACT_V01.md` — tentative workflow representation.
+4. `docs/ARCHITECTURE.md` — repository structure and adapters.
+5. `MIMIC_PROJECT_OVERVIEW.md` — long-term AI teaching vision.
 
 If something conflicts with the v0.1 scope, follow this document and mention the discrepancy. Architectural details may change after evidence from Windows experiments.
