@@ -57,9 +57,9 @@ export default function App() {
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
   const [chatError, setChatError] = useState('');
-  const [targetWindows, setTargetWindows] = useState<TargetWindow[]>([]);
+  const [, setTargetWindows] = useState<TargetWindow[]>([]);
   const [targetWindowId, setTargetWindowId] = useState<number | null>(null);
-  const [permissionGranted, setPermissionGranted] = useState(false);
+  const [permissionGranted] = useState(false);
   const [automationBusy, setAutomationBusy] = useState(false);
   const [automationMessage, setAutomationMessage] = useState('กำหนด EXE และเงื่อนไขหน้าต่างก่อนเริ่มสร้าง workflow');
   const [runPhase, setRunPhase] = useState<WorkflowRunPhase>('idle');
