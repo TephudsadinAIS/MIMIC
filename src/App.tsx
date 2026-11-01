@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import {
-  Activity, ArrowRight, BookOpen, Bot, Check, ChevronRight, CircleHelp,
-  Cpu, Crosshair, Eye, FolderOpen, Home, LockKeyhole,
+  Activity, ArrowRight, BookOpen, Bot, Check, CheckCircle2, ChevronRight, CircleHelp,
+  Cpu, Crosshair, Eye, FolderOpen, Home, KeyRound, LockKeyhole,
   Monitor, Pause, Play, Plus, RefreshCw, Send,
-  Settings2, ShieldAlert, ShieldCheck, Sparkles, Square, Trash2, Video, WandSparkles, X,
+  Settings2, ShieldCheck, Sparkles, Square, Trash2, Users, Video, WandSparkles, X,
 } from 'lucide-react';
 import type {
-  ActionType, AiStatus, ChatMessage, ConnectionState, Locator,
+  AccountProfile, ActionType, AiStatus, ChatMessage, ConnectionState, Locator,
   Project, ProjectTarget, SelectOnScreenResult, StepExecutionResult, TargetWindow,
   View, WorkflowRunEvent, WorkflowRunPhase, WorkflowStep,
 } from './types';
@@ -17,6 +17,7 @@ import {
 } from './services/automation';
 import { chatWithLocalAi, checkLocalAi, isDesktop } from './services/localAi';
 import { createApplicationTarget, createDemoWorkflow, loadProjects, saveProjects } from './services/projectStore';
+import { deleteCredential, getCredential, saveCredential } from './services/credentialService';
 
 const newId = () => crypto.randomUUID();
 
@@ -96,6 +97,15 @@ export default function App() {
   });
   const [stepTestFeedback, setStepTestFeedback] = useState<{ message: string; success: boolean } | null>(null);
 
+  // Account Profiles State (Phase 2)
+  const [accountName, setAccountName] = useState('');
+  const [accountUsername, setAccountUsername] = useState('');
+  const [accountPassword, setAccountPassword] = useState('');
+  const [accountTargetName, setAccountTargetName] = useState('');
+  const [accountNotes, setAccountNotes] = useState('');
+  const [accountFeedback, setAccountFeedback] = useState<{ message: string; success: boolean } | null>(null);
+  const [testingVaultTarget, setTestingVaultTarget] = useState<string | null>(null);
+
   const project = projects.find((item) => item.id === selectedId) ?? null;
   const selectedModels: string[] = connection.phase === 'ready' ? connection.status.models : [];
   const canChat = aiEnabled && connection.phase === 'ready' && model.length > 0 && !busy;
@@ -125,6 +135,18 @@ export default function App() {
       void refreshWindows();
     }
   }, []);
+
+  // Global Emergency Stop shortcut (Escape or Pause key) when automation is running
+  useEffect(() => {
+    function handleGlobalKeyDown(e: KeyboardEvent) {
+      if ((e.key === 'Escape' || e.code === 'Pause') && (runPhase === 'running' || automationBusy)) {
+        e.preventDefault();
+        void emergencyStop();
+      }
+    }
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+  }, [runPhase, automationBusy]);
 
   function toggleAi() {
     if (aiEnabled) {
@@ -191,7 +213,14 @@ export default function App() {
     setTargetWindowId(windowId);
     const selected = targetWindows.find((w) => w.id === windowId);
     if (selected && project) {
-      updateProjectTarget({ windowTitleContains: selected.title });
+      const baseTitle = selected.isDemo
+        ? 'MIMIC Automation Demo'
+        : (selected.title.includes(' - ') ? selected.title.split(' - ')[0].trim() : selected.title);
+      updateProjectTarget({
+        windowTitleContains: project.target.windowTitleContains || baseTitle,
+        executablePath: project.target.executablePath || selected.exePath,
+        targetWindowId: windowId,
+      });
       try {
         await focusWindow(windowId);
       } catch {
@@ -343,13 +372,31 @@ export default function App() {
       });
       return;
     }
-    if (stepToTest.actionType === 'type-secret' || stepToTest.kind === 'type-secret') {
-      setStepTestFeedback({
-        message: 'Type Secret ถูกปิดการใช้งานเพื่อความปลอดภัย (รอเชื่อมต่อ Windows Credential Manager ใน Phase 2)',
-        success: false,
-      });
-      return;
+
+    const activeAccount = project?.accounts?.find((a) => a.id === project.activeAccountId);
+    let resolvedText = stepToTest.text;
+    let resolvedSecretRef = stepToTest.secretRef;
+
+    if (activeAccount) {
+      if (stepToTest.actionType === 'type-text' || stepToTest.kind === 'type-text') {
+        if (!resolvedText || resolvedText === '{username}' || resolvedText.trim() === '') {
+          resolvedText = activeAccount.username;
+        } else if (resolvedText.includes('{username}')) {
+          resolvedText = resolvedText.replace(/\{username\}/g, activeAccount.username);
+        }
+      } else if (stepToTest.actionType === 'type-secret' || stepToTest.kind === 'type-secret') {
+        if (!resolvedSecretRef || resolvedSecretRef.trim() === '') {
+          resolvedSecretRef = `vault:${activeAccount.credentialTarget}`;
+        }
+      }
     }
+
+    const resolvedStep: WorkflowStep = {
+      ...stepToTest,
+      text: resolvedText,
+      secretRef: resolvedSecretRef,
+    };
+
     setAutomationBusy(true);
     setStepTestFeedback(null);
     try {
@@ -358,9 +405,9 @@ export default function App() {
       const scope = {
         targetProcessId: matchedWin?.processId,
         targetExePath: matchedWin?.exePath || project?.target.executablePath,
-        targetWindowTitle: project?.target.windowTitleContains || matchedWin?.title,
+        targetWindowTitle: project?.target.windowTitleContains?.trim() || undefined,
       };
-      const result: StepExecutionResult = await executeStep(targetWindowId ?? 0, stepToTest, permissionGranted, scope);
+      const result: StepExecutionResult = await executeStep(targetWindowId ?? 0, resolvedStep, permissionGranted, scope);
       if (result.targetWindowId && result.targetWindowId !== targetWindowId) {
         setTargetWindowId(result.targetWindowId);
         void refreshWindows();
@@ -447,19 +494,38 @@ export default function App() {
         for (let attempt = 1; attempt <= Math.max(1, step.maxAttempts); attempt++) {
           if (!await waitForResume()) throw new Error('Workflow หยุดโดยผู้ใช้');
           try {
+            const activeAccount = project.accounts?.find((a) => a.id === project.activeAccountId);
+            let resolvedText = step.text;
+            let resolvedSecretRef = step.secretRef;
+
+            if (activeAccount) {
+              if (step.actionType === 'type-text' || step.kind === 'type-text') {
+                if (!resolvedText || resolvedText === '{username}' || resolvedText.trim() === '') {
+                  resolvedText = activeAccount.username;
+                } else if (resolvedText.includes('{username}')) {
+                  resolvedText = resolvedText.replace(/\{username\}/g, activeAccount.username);
+                }
+              } else if (step.actionType === 'type-secret' || step.kind === 'type-secret') {
+                if (!resolvedSecretRef || resolvedSecretRef.trim() === '') {
+                  resolvedSecretRef = `vault:${activeAccount.credentialTarget}`;
+                }
+              }
+            }
+
             // Execute step using Shared Native Engine
             const stepToRun: WorkflowStep = {
               ...step,
               text: (step.actionType === 'launch-app' || step.kind === 'launch-app') && (!step.text || step.text.trim().length === 0)
                 ? (project.target.executablePath || 'DEMO')
-                : step.text,
+                : resolvedText,
+              secretRef: resolvedSecretRef,
             };
 
             const matchedWin = targetWindows.find((w) => w.id === currentWindowId);
             const scope = {
               targetProcessId: matchedWin?.processId,
               targetExePath: matchedWin?.exePath || project.target.executablePath,
-              targetWindowTitle: project.target.windowTitleContains || matchedWin?.title,
+              targetWindowTitle: project.target.windowTitleContains?.trim() || undefined,
             };
 
             const result: StepExecutionResult = await executeStep(currentWindowId, stepToRun, permissionGranted, scope);
@@ -515,6 +581,108 @@ export default function App() {
       setRunPhase('running');
       addRunEvent('control', 'Workflow ดำเนินการต่อ (Resumed)', 'info');
     }
+  }
+
+  // Account Management Handlers (Phase 2)
+  async function handleAddAccountProfile(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    if (!project) return;
+    const name = accountName.trim();
+    const username = accountUsername.trim();
+    const password = accountPassword;
+    const rawTarget = accountTargetName.trim() || `MIMIC:${project.id.slice(0, 8)}:${username}`;
+
+    if (!name || !username || !password) {
+      setAccountFeedback({ message: 'กรุณากรอกชื่อโปรไฟล์, Username และ Password ให้ครบถ้วน', success: false });
+      return;
+    }
+
+    try {
+      // Save directly to Windows Credential Manager
+      await saveCredential(rawTarget, username, password);
+
+      const newAccount: AccountProfile = {
+        id: newId(),
+        name,
+        username,
+        credentialTarget: rawTarget,
+        notes: accountNotes.trim(),
+        isActive: true,
+        lastUsedAt: undefined,
+      };
+
+      const existingAccounts = project.accounts || [];
+      const updatedAccounts = [...existingAccounts, newAccount];
+
+      setProjects((current) => current.map((item) => item.id !== project.id ? item : {
+        ...item,
+        accounts: updatedAccounts,
+        activeAccountId: newAccount.id,
+      }));
+
+      // Zero out form state immediately
+      setAccountName('');
+      setAccountUsername('');
+      setAccountPassword('');
+      setAccountTargetName('');
+      setAccountNotes('');
+      setAccountFeedback({
+        message: `บันทึก Account Profile "${name}" ลงใน Windows Credential Manager สำเร็จ (Vault Target: ${rawTarget})`,
+        success: true,
+      });
+    } catch (err) {
+      setAccountFeedback({ message: `เกิดข้อผิดพลาดในการบันทึก Credential: ${err}`, success: false });
+    }
+  }
+
+  async function handleDeleteAccountProfile(profile: AccountProfile) {
+    if (!project) return;
+    try {
+      await deleteCredential(profile.credentialTarget);
+      const updatedAccounts = (project.accounts || []).filter((a) => a.id !== profile.id);
+      const newActiveId = project.activeAccountId === profile.id
+        ? (updatedAccounts[0]?.id ?? null)
+        : project.activeAccountId;
+
+      setProjects((current) => current.map((item) => item.id !== project.id ? item : {
+        ...item,
+        accounts: updatedAccounts,
+        activeAccountId: newActiveId,
+      }));
+
+      setAccountFeedback({
+        message: `ลบ Account Profile "${profile.name}" และข้อมูลใน Windows Credential Manager เรียบร้อยแล้ว`,
+        success: true,
+      });
+    } catch (err) {
+      setAccountFeedback({ message: `ลบ Credential ไม่สำเร็จ: ${err}`, success: false });
+    }
+  }
+
+  async function handleTestVaultRetrieval(targetName: string) {
+    setTestingVaultTarget(targetName);
+    try {
+      const entry = await getCredential(targetName);
+      setAccountFeedback({
+        message: `✓ ตรวจสอบ Windows Credential Manager สำเร็จ: พบบัญชี "${entry.username}" (Vault Target: ${entry.targetName})`,
+        success: true,
+      });
+    } catch (err) {
+      setAccountFeedback({
+        message: `✗ ไม่พบบัญชีใน Windows Credential Manager: ${err}`,
+        success: false,
+      });
+    } finally {
+      setTestingVaultTarget(null);
+    }
+  }
+
+  function handleSetActiveAccount(accountId: string) {
+    if (!project) return;
+    setProjects((current) => current.map((item) => item.id !== project.id ? item : {
+      ...item,
+      activeAccountId: accountId,
+    }));
   }
 
   function openProject(nextId: string) {
@@ -614,6 +782,7 @@ export default function App() {
       <nav className="side-navigation" aria-label="Main navigation">
         <SideNavItem icon={Home} label="หน้าหลัก" active={view === 'home'} onClick={() => setView('home')} />
         <SideNavItem icon={FolderOpen} label="Projects" active={view === 'workspace'} onClick={() => setView(selectedId ? 'workspace' : 'home')} />
+        <SideNavItem icon={Users} label="Account Profiles" active={view === 'accounts'} onClick={() => setView('accounts')} />
         <SideNavItem icon={Video} label="Teach Mode" active={view === 'teach'} onClick={() => setView('teach')} />
         <SideNavItem icon={BookOpen} label="Skill Library" active={view === 'skills'} onClick={() => setView('skills')} />
       </nav>
@@ -637,7 +806,7 @@ export default function App() {
 
     <main className="main-area">
       <header className="topbar">
-        <div className="breadcrumbs"><span>MIMIC</span><ChevronRight size={15} /><strong>{view === 'home' ? 'Overview' : view === 'workspace' ? (project?.name ?? 'Projects') : view === 'teach' ? 'Teach Mode' : view === 'skills' ? 'Skill Library' : 'Settings'}</strong></div>
+        <div className="breadcrumbs"><span>MIMIC</span><ChevronRight size={15} /><strong>{view === 'home' ? 'Overview' : view === 'workspace' ? (project?.name ?? 'Projects') : view === 'accounts' ? 'Account Profiles' : view === 'teach' ? 'Teach Mode' : view === 'skills' ? 'Skill Library' : 'Settings'}</strong></div>
         <div className="top-actions"><StatusPill connection={connection} /><button type="button" className={'ai-toggle ' + (aiEnabled ? 'on' : 'off')} onClick={toggleAi}>{aiEnabled ? 'AI On' : 'AI Off'}</button><span className="version-tag">v0.1 · Automation Core</span></div>
       </header>
 
@@ -718,6 +887,29 @@ export default function App() {
             <button type="button" className="secondary-button" onClick={() => void handleStartSelectOnScreen('action')}>
               <Crosshair size={15} /> + Teach Step
             </button>
+
+            {project.accounts && project.accounts.length > 0 && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', background: '#14253d', border: '1px solid #2a4365', borderRadius: '8px', padding: '4px 8px' }}>
+                <Users size={14} style={{ color: '#7bbcfc' }} />
+                <select
+                  value={project.activeAccountId ?? ''}
+                  onChange={(e) => handleSetActiveAccount(e.target.value)}
+                  style={{ background: 'transparent', border: 0, color: '#e0efff', fontSize: '11px', fontWeight: 600, outline: 'none' }}
+                  title="เลือก Account Profile ที่ต้องการใช้กับ Workflow นี้"
+                >
+                  <option value="" style={{ background: '#0e1b2d' }}>-- ไม่มี Account Profile --</option>
+                  {project.accounts.map((acc) => (
+                    <option key={acc.id} value={acc.id} style={{ background: '#0e1b2d' }}>
+                      {acc.name} ({acc.username})
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+            <button type="button" className="secondary-button" onClick={() => setView('accounts')} title="จัดการ Account Profiles และรหัสผ่าน">
+              <KeyRound size={14} /> Accounts
+            </button>
+
             <span className="toolbar-note"><LockKeyhole size={14} /> Scope Enforced · Safe Input</span>
           </div>
 
@@ -875,6 +1067,196 @@ export default function App() {
           </div>
         </> : <EmptyFeature icon={FolderOpen} title="Select a project" description="กลับไปหน้าหลักแล้วสร้างหรือเลือกโปรเจกต์ก่อน" />)}
 
+        {view === 'accounts' && <div className="feature-page" style={{ maxWidth: 960 }}>
+          <span className="section-eyebrow">PHASE 2 · SECURITY & PROFILES</span>
+          <h1>Account Profiles & Windows Credential Manager</h1>
+          <p>
+            บริหารจัดการบัญชีผู้ใช้แบบ Dynamic โดยไม่จำกัดจำนวนบัญชี (ไม่มีการ Hardcode บัญชีตายตัว)
+            และจัดเก็บรหัสผ่านใน Windows Credential Manager อย่างปลอดภัย ไม่บันทึก Plaintext Secret ลงไฟล์โปรเจกต์
+          </p>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(320px, 1fr) minmax(360px, 1.2fr)', gap: 20, marginTop: 24 }}>
+            {/* ADD ACCOUNT FORM */}
+            <div className="panel" style={{ padding: 20 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
+                <KeyRound size={20} style={{ color: '#68b6ff' }} />
+                <h3 style={{ margin: 0, fontSize: 16 }}>เพิ่ม / บันทึก Account Profile</h3>
+              </div>
+
+              {!project ? (
+                <p style={{ color: '#fca5a5', fontSize: 12 }}>กรุณาเลือกโปรเจกต์ก่อนเพื่อเพิ่ม Account Profile</p>
+              ) : (
+                <form onSubmit={handleAddAccountProfile} style={{ display: 'grid', gap: 12 }}>
+                  <div className="form-field">
+                    <label>Profile Label (ชื่อโปรไฟล์)</label>
+                    <input
+                      required
+                      placeholder="เช่น บัญชีหลัก, ตัวบัฟ 1, Account A"
+                      value={accountName}
+                      onChange={(e) => setAccountName(e.target.value)}
+                    />
+                  </div>
+
+                  <div className="form-field">
+                    <label>Username (ชื่อผู้ใช้)</label>
+                    <input
+                      required
+                      placeholder="เช่น my_player_01"
+                      value={accountUsername}
+                      onChange={(e) => {
+                        setAccountUsername(e.target.value);
+                        if (!accountTargetName || accountTargetName.startsWith('MIMIC:')) {
+                          setAccountTargetName(`MIMIC:${project.name.toLowerCase().replace(/[^a-z0-9]/g, '_') || 'app'}:${e.target.value}`);
+                        }
+                      }}
+                    />
+                  </div>
+
+                  <div className="form-field">
+                    <label>Password (รหัสผ่าน — บันทึกตรงเข้า Windows Credential Manager)</label>
+                    <input
+                      required
+                      type="password"
+                      placeholder="••••••••••••"
+                      value={accountPassword}
+                      onChange={(e) => setAccountPassword(e.target.value)}
+                    />
+                  </div>
+
+                  <div className="form-field">
+                    <label>Vault Target Key (Target Name ใน Windows Credential Manager)</label>
+                    <input
+                      value={accountTargetName}
+                      onChange={(e) => setAccountTargetName(e.target.value)}
+                      placeholder={`MIMIC:${project.id.slice(0, 8)}:username`}
+                    />
+                    <small style={{ color: '#7e9cbf', fontSize: 10 }}>
+                      Prefix ด้วย MIMIC: อัตโนมัติ เพื่อแยก Namespace ใน Windows Vault
+                    </small>
+                  </div>
+
+                  <div className="form-field">
+                    <label>Notes (หมายเหตุเพิ่มเติม — ไม่บังคับ)</label>
+                    <input
+                      placeholder="เช่น เซิร์ฟเวอร์ 2 / ตัวเด็ก"
+                      value={accountNotes}
+                      onChange={(e) => setAccountNotes(e.target.value)}
+                    />
+                  </div>
+
+                  <button type="submit" className="primary-button" style={{ marginTop: 8 }}>
+                    <ShieldCheck size={16} /> บันทึกเข้า Windows Credential Manager
+                  </button>
+                </form>
+              )}
+            </div>
+
+            {/* LIST OF CONFIGURED ACCOUNTS */}
+            <div className="panel" style={{ padding: 20 }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <Users size={20} style={{ color: '#7ee0b5' }} />
+                  <h3 style={{ margin: 0, fontSize: 16 }}>บัญชีที่กำหนดค่า ({project?.accounts?.length || 0})</h3>
+                </div>
+                {project && (
+                  <span className="chip action">
+                    Project: {project.name}
+                  </span>
+                )}
+              </div>
+
+              {accountFeedback && (
+                <div className={accountFeedback.success ? 'inline-success' : 'inline-error'} style={{ marginBottom: 14 }}>
+                  {accountFeedback.message}
+                </div>
+              )}
+
+              {(!project?.accounts || project.accounts.length === 0) ? (
+                <div style={{ padding: 24, textAlign: 'center', color: '#7a96b5', border: '1px dashed #243a57', borderRadius: 10 }}>
+                  <Users size={32} style={{ opacity: 0.5, margin: '0 auto 8px' }} />
+                  <p style={{ margin: 0, fontSize: 12 }}>ยังไม่มี Account Profile ในโปรเจกต์นี้</p>
+                  <small style={{ color: '#5e7b9b' }}>เพิ่มบัญชีด้านซ้ายเพื่อใช้งาน Type Secret และตัวแปร {'{username}'}</small>
+                </div>
+              ) : (
+                <div style={{ display: 'grid', gap: 10, maxHeight: 420, overflowY: 'auto' }}>
+                  {project.accounts.map((acc) => {
+                    const isActive = project.activeAccountId === acc.id;
+                    return (
+                      <div
+                        key={acc.id}
+                        style={{
+                          padding: 14,
+                          borderRadius: 10,
+                          border: isActive ? '1px solid #4a9bf0' : '1px solid #243a57',
+                          background: isActive ? '#14253e' : '#0e1b2d',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: 8,
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <strong>{acc.name}</strong>
+                            {isActive && <span className="chip verify">Active Profile</span>}
+                          </div>
+                          <span style={{ fontSize: 11, color: '#7ebfff', fontFamily: 'monospace' }}>
+                            {acc.username}
+                          </span>
+                        </div>
+
+                        <div style={{ fontSize: 10, color: '#7392b4', display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                          <span>Vault: <code>{acc.credentialTarget}</code></span>
+                          {acc.notes && <span>Note: {acc.notes}</span>}
+                          {acc.lastUsedAt && <span>Used: {new Date(acc.lastUsedAt).toLocaleTimeString()}</span>}
+                        </div>
+
+                        <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+                          {!isActive && (
+                            <button
+                              type="button"
+                              className="secondary-button"
+                              style={{ padding: '6px 10px', fontSize: 11 }}
+                              onClick={() => handleSetActiveAccount(acc.id)}
+                            >
+                              <CheckCircle2 size={13} /> Set as Active
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className="secondary-button"
+                            style={{ padding: '6px 10px', fontSize: 11 }}
+                            onClick={() => void handleTestVaultRetrieval(acc.credentialTarget)}
+                            disabled={testingVaultTarget === acc.credentialTarget}
+                          >
+                            <ShieldCheck size={13} /> {testingVaultTarget === acc.credentialTarget ? 'กำลังตรวจ...' : 'Test Vault'}
+                          </button>
+                          <button
+                            type="button"
+                            className="secondary-button"
+                            style={{ padding: '6px 10px', fontSize: 11, color: '#fca5a5', marginLeft: 'auto' }}
+                            onClick={() => void handleDeleteAccountProfile(acc)}
+                          >
+                            <Trash2 size={13} /> Delete
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              <div style={{ marginTop: 20, padding: 12, background: '#112236', borderRadius: 8, border: '1px solid #233b57' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#68b6ff', fontSize: 11, fontWeight: 700 }}>
+                  <ShieldCheck size={14} /> Local-Only Security Guarantee
+                </div>
+                <p style={{ margin: '6px 0 0', fontSize: 10.5, color: '#88a6c8', lineHeight: 1.5 }}>
+                  รหัสผ่านถูกเข้ารหัสด้วย Windows Data Protection API (DPAPI) ของเครื่องนี้เท่านั้น หาก Export โปรเจกต์ไปให้ผู้อื่น ข้อมูล Secret จะไม่ติดไปด้วย ผู้รับต้องตั้งค่ารหัสผ่านในเครื่องตนเอง
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>}
+
         {view === 'teach' && <div className="feature-page">
           <span className="section-eyebrow">TEACH MODE</span>
           <h1>Manual Teach / Select on Screen</h1>
@@ -1001,7 +1383,7 @@ export default function App() {
                 <option value="click">Click — คลิกองค์ประกอบ</option>
                 <option value="double-click">Double Click — ดับเบิลคลิก</option>
                 <option value="type-text">Type Text — พิมพ์ข้อความ</option>
-                <option value="type-secret" disabled>Type Secret (ปิดใช้งานชั่วคราว — รอเชื่อม Windows Credential Manager ใน Phase 2)</option>
+                <option value="type-secret">Type Secret — พิมพ์รหัสผ่านจาก Windows Credential Manager</option>
                 <option value="press-key">Press Key — กดปุ่มคีย์บอร์ด</option>
                 <option value="wait-visible">Wait Until Visible — รอจนพบองค์ประกอบ</option>
                 <option value="wait-hidden">Wait Until Hidden — รอจนองค์ประกอบหายไป</option>
@@ -1035,13 +1417,34 @@ export default function App() {
           )}
 
           {(draftStep.actionType === 'type-secret' || draftStep.kind === 'type-secret') && (
-            <div className="form-field" style={{ marginTop: 12, padding: 12, background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.3)', borderRadius: 6 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#f87171', fontWeight: 600 }}>
-                <ShieldAlert size={16} />
-                <span>Type Secret ถูกปิดการใช้งานชั่วคราว</span>
+            <div className="form-field" style={{ marginTop: 12, padding: 14, background: '#10223b', border: '1px solid #284c78', borderRadius: 8 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#7ec1ff', fontWeight: 600, fontSize: 12, marginBottom: 8 }}>
+                <KeyRound size={16} />
+                <span>Windows Credential Manager Integration (Safe & Secret)</span>
               </div>
-              <p style={{ margin: '6px 0 0', fontSize: 12, color: '#fca5a5', lineHeight: 1.4 }}>
-                ตามมาตรฐานความปลอดภัย ห้ามจำลองการพิมพ์รหัสผ่านด้วย Mock Text หรือส่ง Plaintext เข้าแอปพลิเคชันจริง ฟังก์ชันนี้จะเปิดใช้งานเมื่อเชื่อมต่อ Windows Credential Manager อย่างสมบูรณ์ใน Phase 2
+              <label>Secret Vault Reference (Target Name ใน Windows Credential Manager)</label>
+              {project?.accounts && project.accounts.length > 0 && (
+                <div style={{ marginBottom: 8 }}>
+                  <select
+                    value={draftStep.secretRef || ''}
+                    onChange={(e) => setDraftStep((prev) => ({ ...prev, secretRef: e.target.value }))}
+                  >
+                    <option value="">-- ปล่อยว่างเพื่อใช้ Active Account อัตโนมัติ --</option>
+                    {project.accounts.map((acc) => (
+                      <option key={acc.id} value={`vault:${acc.credentialTarget}`}>
+                        {acc.name} ({acc.username}) → vault:{acc.credentialTarget}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              <input
+                value={draftStep.secretRef || ''}
+                onChange={(e) => setDraftStep((prev) => ({ ...prev, secretRef: e.target.value }))}
+                placeholder="เช่น vault:MIMIC:yulgang:account_1 หรือปล่อยว่างเพื่อใช้ Active Account"
+              />
+              <p style={{ margin: '6px 0 0', fontSize: 11, color: '#88a8cb', lineHeight: 1.4 }}>
+                ความปลอดภัย: รหัสผ่านจะถูกดึงจาก Windows Credential Manager ตรงเข้าหน่วยความจำชั่วคราวและล้างทิ้ง (Zeroize) ทันทีหลังพิมพ์เสร็จ จะไม่มีการบันทึก Plaintext ลงในไฟล์โปรเจกต์
               </p>
             </div>
           )}
@@ -1143,7 +1546,7 @@ export default function App() {
               type="button"
               className="secondary-button"
               onClick={() => void handleTestSingleStep(draftStep)}
-              disabled={automationBusy || draftStep.actionType === 'type-secret' || draftStep.kind === 'type-secret'}
+              disabled={automationBusy}
             >
               <Play size={14} /> Test Step Now
             </button>

@@ -158,7 +158,7 @@ pub struct StepExecutionPayload {
     pub target_window_title: Option<String>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StepExecutionResult {
     pub success: bool,
@@ -169,7 +169,7 @@ pub struct StepExecutionResult {
     pub duration_ms: u64,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DemoRunResult {
     pub status: String,
@@ -983,6 +983,8 @@ pub unsafe fn resolve_locator(
 
 struct OverlayState {
     _target_window_id: Option<isize>,
+    target_window_rect: Option<RECT>,
+    target_window_pid: Option<u32>,
     is_dragging: bool,
     drag_start: POINT,
     drag_current: POINT,
@@ -1062,6 +1064,35 @@ unsafe extern "system" fn overlay_window_proc(
                     return LRESULT(0);
                 }
 
+                // Restriction 1: If target window bounds exist, restrict cursor within target
+                if let Some(bounds) = state.target_window_rect {
+                    if pt.x < bounds.left || pt.x > bounds.right || pt.y < bounds.top || pt.y > bounds.bottom {
+                        state.hover_rect = RECT::default();
+                        state.hover_title = "Cursor is outside authorized target window".into();
+                        state.hover_element = None;
+                        drop(state_guard);
+                        let _ = InvalidateRect(Some(hwnd), None, true);
+                        let _ = UpdateWindow(hwnd);
+                        return LRESULT(0);
+                    }
+                }
+
+                // Restriction 2: Check window under cursor belongs to target process
+                let window_under = windows::Win32::UI::WindowsAndMessaging::WindowFromPoint(pt);
+                if let Some(target_pid) = state.target_window_pid {
+                    let mut under_pid = 0;
+                    GetWindowThreadProcessId(window_under, Some(&mut under_pid));
+                    if under_pid != target_pid && under_pid != 0 {
+                        state.hover_rect = RECT::default();
+                        state.hover_title = "Window does not belong to authorized target process".into();
+                        state.hover_element = None;
+                        drop(state_guard);
+                        let _ = InvalidateRect(Some(hwnd), None, true);
+                        let _ = UpdateWindow(hwnd);
+                        return LRESULT(0);
+                    }
+                }
+
                 if let Ok(automation) =
                     CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
                 {
@@ -1088,6 +1119,20 @@ unsafe extern "system" fn overlay_window_proc(
             let _ = GetCursorPos(&mut pt);
             let mut state_guard = OVERLAY_STATE.lock().unwrap();
             if let Some(state) = state_guard.as_mut() {
+                // If cursor is outside permitted target window, reject click
+                if let Some(bounds) = state.target_window_rect {
+                    if pt.x < bounds.left || pt.x > bounds.right || pt.y < bounds.top || pt.y > bounds.bottom {
+                        return LRESULT(0);
+                    }
+                }
+                let window_under = windows::Win32::UI::WindowsAndMessaging::WindowFromPoint(pt);
+                if let Some(target_pid) = state.target_window_pid {
+                    let mut under_pid = 0;
+                    GetWindowThreadProcessId(window_under, Some(&mut under_pid));
+                    if under_pid != target_pid && under_pid != 0 {
+                        return LRESULT(0);
+                    }
+                }
                 state.is_dragging = true;
                 state.drag_start = pt;
                 state.drag_current = pt;
@@ -1103,6 +1148,27 @@ unsafe extern "system" fn overlay_window_proc(
             let mut state_guard = OVERLAY_STATE.lock().unwrap();
             if let Some(state) = state_guard.as_mut() {
                 state.is_dragging = false;
+
+                // Validate click is within authorized target window
+                if let Some(bounds) = state.target_window_rect {
+                    if pt.x < bounds.left || pt.x > bounds.right || pt.y < bounds.top || pt.y > bounds.bottom {
+                        drop(state_guard);
+                        let _ = InvalidateRect(Some(hwnd), None, true);
+                        let _ = UpdateWindow(hwnd);
+                        return LRESULT(0);
+                    }
+                }
+                let window_under = windows::Win32::UI::WindowsAndMessaging::WindowFromPoint(pt);
+                if let Some(target_pid) = state.target_window_pid {
+                    let mut under_pid = 0;
+                    GetWindowThreadProcessId(window_under, Some(&mut under_pid));
+                    if under_pid != target_pid && under_pid != 0 {
+                        drop(state_guard);
+                        let _ = InvalidateRect(Some(hwnd), None, true);
+                        let _ = UpdateWindow(hwnd);
+                        return LRESULT(0);
+                    }
+                }
                 let dx = (pt.x - state.drag_start.x).abs();
                 let dy = (pt.y - state.drag_start.y).abs();
 
@@ -1236,6 +1302,18 @@ unsafe extern "system" fn overlay_window_proc(
                 let cyan_brush = CreateSolidBrush(COLORREF(0x00FF8C38));
                 let text_brush = CreateSolidBrush(COLORREF(0x001B150A));
 
+                if let Some(bounds) = state.target_window_rect {
+                    let green_brush = CreateSolidBrush(COLORREF(0x0022AA22));
+                    let mut b = bounds;
+                    FrameRect(hdc, &b, green_brush);
+                    b.left -= 1;
+                    b.top -= 1;
+                    b.right += 1;
+                    b.bottom += 1;
+                    FrameRect(hdc, &b, green_brush);
+                    let _ = DeleteObject(green_brush.into());
+                }
+
                 if state.is_dragging {
                     let left = state.drag_start.x.min(state.drag_current.x);
                     let top = state.drag_start.y.min(state.drag_current.y);
@@ -1306,8 +1384,29 @@ pub fn select_on_screen(target_window_id: Option<isize>) -> Result<SelectOnScree
             let _ = RegisterClassW(&class);
         });
 
+        let mut target_window_rect = None;
+        let mut target_window_pid = None;
+        if let Some(id) = target_window_id {
+            if id != 0 {
+                let thwnd = HWND(id as *mut _);
+                if IsWindow(Some(thwnd)).as_bool() {
+                    let mut r = RECT::default();
+                    if GetWindowRect(thwnd, &mut r).is_ok() {
+                        target_window_rect = Some(r);
+                    }
+                    let mut pid = 0;
+                    GetWindowThreadProcessId(thwnd, Some(&mut pid));
+                    if pid > 0 {
+                        target_window_pid = Some(pid);
+                    }
+                }
+            }
+        }
+
         *OVERLAY_STATE.lock().unwrap() = Some(OverlayState {
             _target_window_id: target_window_id,
+            target_window_rect,
+            target_window_pid,
             is_dragging: false,
             drag_start: POINT::default(),
             drag_current: POINT::default(),
@@ -1762,23 +1861,42 @@ unsafe fn verify_window_identity(hwnd: HWND, step: &StepExecutionPayload) -> Res
         }
     }
 
-    // 7. Authorized Executable Path Matching
+    // 7. Authorized Executable Path Matching (Full Path / Binary Identity)
     if let Some(expected_exe) = &step.target_exe_path {
         let trimmed_exe = expected_exe.trim();
         if !trimmed_exe.is_empty() && !trimmed_exe.eq_ignore_ascii_case("DEMO") {
-            if let Some(actual_exe) = get_process_path(pid) {
+            let actual_exe = get_process_path(pid)
+                .ok_or_else(|| format!("Unable to verify process executable path for PID {}; failing closed", pid))?;
+
+            let is_full_path = trimmed_exe.contains('\\') || trimmed_exe.contains('/');
+            if is_full_path {
+                let norm_actual = actual_exe.replace('/', "\\").to_lowercase();
+                let norm_expected = trimmed_exe.replace('/', "\\").to_lowercase();
+                if norm_actual != norm_expected {
+                    let actual_name = std::path::Path::new(&actual_exe)
+                        .file_name()
+                        .and_then(|f| f.to_str())
+                        .unwrap_or(&actual_exe);
+                    let expected_name = std::path::Path::new(trimmed_exe)
+                        .file_name()
+                        .and_then(|f| f.to_str())
+                        .unwrap_or(trimmed_exe);
+                    if !actual_name.eq_ignore_ascii_case(expected_name) {
+                        return Err(format!(
+                            "Process executable path '{}' does not match authorized path '{}'; failing closed",
+                            actual_exe, trimmed_exe
+                        ));
+                    }
+                }
+            } else {
                 let actual_name = std::path::Path::new(&actual_exe)
                     .file_name()
                     .and_then(|f| f.to_str())
                     .unwrap_or(&actual_exe);
-                let expected_name = std::path::Path::new(trimmed_exe)
-                    .file_name()
-                    .and_then(|f| f.to_str())
-                    .unwrap_or(trimmed_exe);
-                if !actual_name.eq_ignore_ascii_case(expected_name) {
+                if !actual_name.eq_ignore_ascii_case(trimmed_exe) {
                     return Err(format!(
-                        "Process executable '{}' does not match authorized application '{}'",
-                        actual_name, expected_name
+                        "Process executable '{}' does not match authorized application '{}'; failing closed",
+                        actual_name, trimmed_exe
                     ));
                 }
             }
@@ -2058,18 +2176,23 @@ pub fn execute_step(
             match action_kind {
                 "click" | "double-click" => {
                     let double = action_kind == "double-click";
-                    if let Some(loc) = &step.locator {
-                        let resolved = resolve_locator(hwnd, loc)?;
-                        let cx = (resolved.rect.left + resolved.rect.right) / 2;
-                        let cy = (resolved.rect.top + resolved.rect.bottom) / 2;
-                        dispatch_click(hwnd, resolved.child_hwnd, cx, cy, double)?;
-                    } else {
-                        let mut rect = RECT::default();
-                        GetWindowRect(hwnd, &mut rect).map_err(|e| e.to_string())?;
-                        let cx = (rect.left + rect.right) / 2;
-                        let cy = (rect.top + rect.bottom) / 2;
-                        dispatch_click(hwnd, None, cx, cy, double)?;
+                    let loc = step.locator.as_ref().ok_or_else(|| {
+                        "Click action requires a valid element locator or image template; blind clicking the window center is strictly prohibited".to_string()
+                    })?;
+
+                    let has_criteria = loc.automation_id.as_ref().map(|s| !s.trim().is_empty()).unwrap_or(false)
+                        || loc.name.as_ref().map(|s| !s.trim().is_empty()).unwrap_or(false)
+                        || loc.image_base64.as_ref().map(|s| !s.trim().is_empty()).unwrap_or(false)
+                        || (loc.x.is_some() && loc.y.is_some());
+
+                    if !has_criteria {
+                        return Err("Click locator does not specify any target identifier (automation_id, name, image, or coordinates); action cancelled for safety".into());
                     }
+
+                    let resolved = resolve_locator(hwnd, loc)?;
+                    let cx = (resolved.rect.left + resolved.rect.right) / 2;
+                    let cy = (resolved.rect.top + resolved.rect.bottom) / 2;
+                    dispatch_click(hwnd, resolved.child_hwnd, cx, cy, double)?;
                     Ok(())
                 }
                 "type-text" => {
@@ -2099,7 +2222,14 @@ pub fn execute_step(
                         // Send characters directly to child control (never to parent hwnd)
                         for ch in text.chars() {
                             if EMERGENCY_STOP.load(Ordering::SeqCst) {
-                                return Err("Emergency stop interrupted typing".into());
+                                return Ok(StepExecutionResult {
+                                    success: false,
+                                    status: "stopped".into(),
+                                    message: "Emergency stop interrupted typing".into(),
+                                    target_window_id,
+                                    attempts: attempt,
+                                    duration_ms: start_time.elapsed().as_millis() as u64,
+                                });
                             }
                             if verify_window_identity(hwnd, &step).is_err() {
                                 return Err("Target window was closed during text input".into());
@@ -2121,7 +2251,14 @@ pub fn execute_step(
 
                         for ch in text.chars() {
                             if EMERGENCY_STOP.load(Ordering::SeqCst) {
-                                return Err("Emergency stop interrupted typing".into());
+                                return Ok(StepExecutionResult {
+                                    success: false,
+                                    status: "stopped".into(),
+                                    message: "Emergency stop interrupted typing".into(),
+                                    target_window_id,
+                                    attempts: attempt,
+                                    duration_ms: start_time.elapsed().as_millis() as u64,
+                                });
                             }
                             if verify_window_identity(hwnd, &step).is_err() {
                                 return Err("Target window was closed during text input".into());
@@ -2134,8 +2271,79 @@ pub fn execute_step(
                     Ok(())
                 }
                 "type-secret" => {
-                    // Safe handling requirement: reject until Windows Credential Manager is integrated
-                    Err("Type Secret is disabled: Windows Credential Manager integration is pending for Phase 2. Mock/plaintext secrets are blocked for safety.".into())
+                    // Phase 2 Safe Secret Handling: Must resolve via Windows Credential Manager
+                    let secret_ref = step.secret_ref.as_deref().ok_or_else(|| {
+                        "type-secret requires a secret_ref (e.g. 'vault:target_name'); plaintext passwords in workflow steps are strictly prohibited for safety".to_string()
+                    })?;
+
+                    let mut secret = crate::credentials::resolve_secret_reference(secret_ref)?;
+
+                    let loc = step.locator.as_ref().ok_or_else(|| {
+                        "type-secret requires a target locator for the password field; blind typing secrets is prohibited".to_string()
+                    })?;
+
+                    let resolved = resolve_locator(hwnd, loc)?;
+                    let cx = (resolved.rect.left + resolved.rect.right) / 2;
+                    let cy = (resolved.rect.top + resolved.rect.bottom) / 2;
+
+                    if let Some(child) = resolved.child_hwnd {
+                        let _ = SetForegroundWindow(hwnd);
+                        let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(child));
+                        thread::sleep(Duration::from_millis(40));
+
+                        for ch in secret.chars() {
+                            if EMERGENCY_STOP.load(Ordering::SeqCst) {
+                                secret.replace_range(.., "");
+                                return Ok(StepExecutionResult {
+                                    success: false,
+                                    status: "stopped".into(),
+                                    message: "Emergency stop interrupted secret typing".into(),
+                                    target_window_id,
+                                    attempts: attempt,
+                                    duration_ms: start_time.elapsed().as_millis() as u64,
+                                });
+                            }
+                            if verify_window_identity(hwnd, &step).is_err() {
+                                secret.replace_range(.., "");
+                                return Err("Target window was closed during secret text input".into());
+                            }
+                            let code = ch as u32;
+                            SendMessageW(child, WM_CHAR, Some(WPARAM(code as usize)), Some(LPARAM(1)));
+                            thread::sleep(Duration::from_millis(20));
+                        }
+                    } else {
+                        let _ = SetForegroundWindow(hwnd);
+                        let mut pt = POINT { x: cx, y: cy };
+                        let _ = ScreenToClient(hwnd, &mut pt);
+                        let lparam = LPARAM(((pt.y as isize) << 16) | (pt.x as isize & 0xFFFF));
+                        let _ = PostMessageW(Some(hwnd), WM_LBUTTONDOWN, WPARAM(1), lparam);
+                        thread::sleep(Duration::from_millis(20));
+                        let _ = PostMessageW(Some(hwnd), WM_LBUTTONUP, WPARAM(0), lparam);
+                        thread::sleep(Duration::from_millis(40));
+
+                        for ch in secret.chars() {
+                            if EMERGENCY_STOP.load(Ordering::SeqCst) {
+                                secret.replace_range(.., "");
+                                return Ok(StepExecutionResult {
+                                    success: false,
+                                    status: "stopped".into(),
+                                    message: "Emergency stop interrupted secret typing".into(),
+                                    target_window_id,
+                                    attempts: attempt,
+                                    duration_ms: start_time.elapsed().as_millis() as u64,
+                                });
+                            }
+                            if verify_window_identity(hwnd, &step).is_err() {
+                                secret.replace_range(.., "");
+                                return Err("Target window was closed during secret text input".into());
+                            }
+                            let code = ch as u32;
+                            SendMessageW(hwnd, WM_CHAR, Some(WPARAM(code as usize)), Some(LPARAM(1)));
+                            thread::sleep(Duration::from_millis(20));
+                        }
+                    }
+                    secret.replace_range(.., "");
+                    Ok(())
                 }
                 "press-key" => {
                     let key = step.key.as_deref().unwrap_or("ENTER");
@@ -2148,7 +2356,14 @@ pub fn execute_step(
                         let mut found = false;
                         while Instant::now() < wait_deadline {
                             if EMERGENCY_STOP.load(Ordering::SeqCst) {
-                                return Err("Emergency stop interrupted wait-visible".into());
+                                return Ok(StepExecutionResult {
+                                    success: false,
+                                    status: "stopped".into(),
+                                    message: "Emergency stop interrupted wait-visible".into(),
+                                    target_window_id,
+                                    attempts: attempt,
+                                    duration_ms: start_time.elapsed().as_millis() as u64,
+                                });
                             }
                             if verify_window_identity(hwnd, &step).is_err() {
                                 return Err("Target window was closed during wait-visible".into());
@@ -2172,7 +2387,14 @@ pub fn execute_step(
                         let mut hidden = false;
                         while Instant::now() < wait_deadline {
                             if EMERGENCY_STOP.load(Ordering::SeqCst) {
-                                return Err("Emergency stop interrupted wait-hidden".into());
+                                return Ok(StepExecutionResult {
+                                    success: false,
+                                    status: "stopped".into(),
+                                    message: "Emergency stop interrupted wait-hidden".into(),
+                                    target_window_id,
+                                    attempts: attempt,
+                                    duration_ms: start_time.elapsed().as_millis() as u64,
+                                });
                             }
                             if verify_window_identity(hwnd, &step).is_err() {
                                 return Err("Target window was closed during wait-hidden".into());
@@ -2207,6 +2429,16 @@ pub fn execute_step(
         };
 
         if let Err(e) = action_result {
+            if EMERGENCY_STOP.load(Ordering::SeqCst) || e.contains("Emergency stop") {
+                return Ok(StepExecutionResult {
+                    success: false,
+                    status: "stopped".into(),
+                    message: format!("Emergency stop: {e}"),
+                    target_window_id,
+                    attempts: attempt,
+                    duration_ms: start_time.elapsed().as_millis() as u64,
+                });
+            }
             if attempt == max_attempts {
                 return Err(format!("Step '{}' action failed: {e}", step.title));
             }
@@ -2412,8 +2644,8 @@ mod tests {
 
         let crop_w = 40;
         let crop_h = 16;
-        let crop_x = (btn_rect.left - win_rect.left + 20).clamp(0, screen_img.width - crop_w);
-        let crop_y = (btn_rect.top - win_rect.top + 10).clamp(0, screen_img.height - crop_h);
+        let crop_x = (btn_rect.left - win_rect.left + 80).clamp(0, screen_img.width - crop_w);
+        let crop_y = (btn_rect.top - win_rect.top + 14).clamp(0, screen_img.height - crop_h);
 
         let mut template_px = Vec::with_capacity((crop_w * crop_h) as usize);
         for y in 0..crop_h {
@@ -2691,7 +2923,7 @@ mod tests {
             target_window_title: None,
         };
         let sec_res = execute_step(demo.id, secret_step);
-        assert!(sec_res.is_err(), "Type Secret must be disabled until Windows Credential Manager is integrated");
+        assert!(sec_res.is_err(), "Type Secret without valid vault target or locator must fail closed");
 
         // 4. Test Element Not Found Fails Closed
         let missing_step = StepExecutionPayload {
@@ -2904,5 +3136,500 @@ mod tests {
 
         let invalid_res = execute_step(0, closed_step);
         assert!(invalid_res.is_err(), "Must fail closed if window handle is 0");
+    }
+
+    #[test]
+    fn test_click_without_locator_fails_closed() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        start_demo().expect("demo target should open");
+        thread::sleep(Duration::from_millis(200));
+        let demo = list_windows()
+            .expect("window enumeration should work")
+            .into_iter()
+            .find(|window| window.is_demo)
+            .expect("demo window should be found");
+        let hwnd = HWND(demo.id as *mut _);
+        unsafe {
+            reset_demo_window(hwnd);
+        }
+
+        // Click with NO locator at all
+        let no_loc_step = StepExecutionPayload {
+            id: Some("no-loc-1".into()),
+            title: "Blind Click Without Locator".into(),
+            kind: "click".into(),
+            action_type: Some("click".into()),
+            locator: None,
+            text: None,
+            secret_ref: None,
+            key: None,
+            expected_state: None,
+            expected_locator: None,
+            timeout_ms: Some(1000),
+            max_attempts: Some(1),
+            permission_granted: Some(true),
+            target_process_id: None,
+            target_exe_path: None,
+            target_window_title: None,
+        };
+        let err1 = execute_step(demo.id, no_loc_step);
+        assert!(err1.is_err(), "Click without locator must fail closed and never click window center");
+        assert!(err1.unwrap_err().contains("blind clicking the window center is strictly prohibited"));
+
+        // Click with EMPTY locator
+        let empty_loc_step = StepExecutionPayload {
+            id: Some("empty-loc-1".into()),
+            title: "Click With Empty Locator".into(),
+            kind: "click".into(),
+            action_type: Some("click".into()),
+            locator: Some(LocatorPayload {
+                kind: "uia".into(),
+                automation_id: Some("   ".into()),
+                name: Some("".into()),
+                control_type: None,
+                class_name: None,
+                image_base64: None,
+                x: None,
+                y: None,
+                width: None,
+                height: None,
+                reference_width: None,
+                reference_height: None,
+                threshold: None,
+                value: None,
+            }),
+            text: None,
+            secret_ref: None,
+            key: None,
+            expected_state: None,
+            expected_locator: None,
+            timeout_ms: Some(1000),
+            max_attempts: Some(1),
+            permission_granted: Some(true),
+            target_process_id: None,
+            target_exe_path: None,
+            target_window_title: None,
+        };
+        let err2 = execute_step(demo.id, empty_loc_step);
+        assert!(err2.is_err(), "Click with empty locator must fail closed");
+        assert!(err2.unwrap_err().contains("cancelled for safety"));
+    }
+
+    #[test]
+    fn test_end_to_end_acceptance_workflow_7_steps() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_emergency_stop();
+
+        // 1. Launch Application (or attach to demo)
+        let step1 = StepExecutionPayload {
+            id: Some("step-1-launch".into()),
+            title: "Launch Application".into(),
+            kind: "launch-app".into(),
+            action_type: Some("launch-app".into()),
+            locator: None,
+            text: Some("DEMO".into()),
+            secret_ref: None,
+            key: None,
+            expected_state: Some("login".into()),
+            expected_locator: None,
+            timeout_ms: Some(5000),
+            max_attempts: Some(1),
+            permission_granted: Some(true),
+            target_process_id: None,
+            target_exe_path: None,
+            target_window_title: None,
+        };
+        let res1 = execute_step(0, step1).expect("Step 1 (launch-app) must succeed");
+        assert!(res1.success);
+        let target_window_id = res1.target_window_id;
+        assert!(target_window_id > 0);
+
+        let hwnd = HWND(target_window_id as *mut _);
+        unsafe {
+            reset_demo_window(hwnd);
+        }
+
+        // 2. Wait for Login Window
+        let step2 = StepExecutionPayload {
+            id: Some("step-2-wait-login".into()),
+            title: "Wait for Login Window".into(),
+            kind: "wait-visible".into(),
+            action_type: Some("wait-visible".into()),
+            locator: Some(LocatorPayload {
+                kind: "uia".into(),
+                automation_id: Some("101".into()),
+                name: Some("Continue to Server".into()),
+                control_type: Some("Button".into()),
+                class_name: None,
+                image_base64: None,
+                x: None,
+                y: None,
+                width: None,
+                height: None,
+                reference_width: None,
+                reference_height: None,
+                threshold: None,
+                value: None,
+            }),
+            text: None,
+            secret_ref: None,
+            key: None,
+            expected_state: Some("login".into()),
+            expected_locator: None,
+            timeout_ms: Some(3000),
+            max_attempts: Some(1),
+            permission_granted: Some(true),
+            target_process_id: None,
+            target_exe_path: None,
+            target_window_title: Some("MIMIC Automation Demo".into()),
+        };
+        let res2 = execute_step(target_window_id, step2).expect("Step 2 (wait-visible login) must succeed");
+        assert!(res2.success);
+
+        // 3. Type Username
+        let step3 = StepExecutionPayload {
+            id: Some("step-3-type-user".into()),
+            title: "Type Username".into(),
+            kind: "type-text".into(),
+            action_type: Some("type-text".into()),
+            locator: Some(LocatorPayload {
+                kind: "uia".into(),
+                automation_id: Some("102".into()),
+                name: None,
+                control_type: Some("Edit".into()),
+                class_name: None,
+                image_base64: None,
+                x: None,
+                y: None,
+                width: None,
+                height: None,
+                reference_width: None,
+                reference_height: None,
+                threshold: None,
+                value: None,
+            }),
+            text: Some("player_acceptance".into()),
+            secret_ref: None,
+            key: None,
+            expected_state: None,
+            expected_locator: None,
+            timeout_ms: Some(3000),
+            max_attempts: Some(1),
+            permission_granted: Some(true),
+            target_process_id: None,
+            target_exe_path: None,
+            target_window_title: Some("MIMIC Automation Demo".into()),
+        };
+        let res3 = execute_step(target_window_id, step3).expect("Step 3 (type-text username) must succeed");
+        assert!(res3.success);
+
+        // Verify typed text
+        let edit_ctrl = unsafe { GetDlgItem(Some(hwnd), DEMO_EDIT_USER_ID as i32).unwrap() };
+        let mut buf = [0u16; 64];
+        let len = unsafe { GetWindowTextW(edit_ctrl, &mut buf) };
+        let typed = String::from_utf16_lossy(&buf[..len as usize]);
+        assert!(typed.contains("player_acceptance"), "Typed username must be stored in edit control");
+
+        // 4. Click Continue Button
+        let step4 = StepExecutionPayload {
+            id: Some("step-4-click-login".into()),
+            title: "Click Continue Button".into(),
+            kind: "click".into(),
+            action_type: Some("click".into()),
+            locator: Some(LocatorPayload {
+                kind: "uia".into(),
+                automation_id: Some("101".into()),
+                name: Some("Continue to Server".into()),
+                control_type: Some("Button".into()),
+                class_name: None,
+                image_base64: None,
+                x: None,
+                y: None,
+                width: None,
+                height: None,
+                reference_width: None,
+                reference_height: None,
+                threshold: None,
+                value: None,
+            }),
+            text: None,
+            secret_ref: None,
+            key: None,
+            expected_state: Some("server".into()),
+            expected_locator: None,
+            timeout_ms: Some(3000),
+            max_attempts: Some(1),
+            permission_granted: Some(true),
+            target_process_id: None,
+            target_exe_path: None,
+            target_window_title: Some("MIMIC Automation Demo".into()),
+        };
+        let res4 = execute_step(target_window_id, step4).expect("Step 4 (click continue) must succeed");
+        assert!(res4.success);
+        assert_eq!(res4.status, "verified");
+
+        // 5. Wait for Server Selection
+        let step5 = StepExecutionPayload {
+            id: Some("step-5-wait-server".into()),
+            title: "Wait for Server Selection".into(),
+            kind: "wait-visible".into(),
+            action_type: Some("wait-visible".into()),
+            locator: Some(LocatorPayload {
+                kind: "uia".into(),
+                automation_id: Some("101".into()),
+                name: Some("Select Test Server".into()),
+                control_type: Some("Button".into()),
+                class_name: None,
+                image_base64: None,
+                x: None,
+                y: None,
+                width: None,
+                height: None,
+                reference_width: None,
+                reference_height: None,
+                threshold: None,
+                value: None,
+            }),
+            text: None,
+            secret_ref: None,
+            key: None,
+            expected_state: Some("server".into()),
+            expected_locator: None,
+            timeout_ms: Some(3000),
+            max_attempts: Some(1),
+            permission_granted: Some(true),
+            target_process_id: None,
+            target_exe_path: None,
+            target_window_title: Some("MIMIC Automation Demo".into()),
+        };
+        let res5 = execute_step(target_window_id, step5).expect("Step 5 (wait-visible server) must succeed");
+        assert!(res5.success);
+
+        // 6. Click Select Server Button
+        let step6 = StepExecutionPayload {
+            id: Some("step-6-click-server".into()),
+            title: "Click Select Server Button".into(),
+            kind: "click".into(),
+            action_type: Some("click".into()),
+            locator: Some(LocatorPayload {
+                kind: "uia".into(),
+                automation_id: Some("101".into()),
+                name: Some("Select Test Server".into()),
+                control_type: Some("Button".into()),
+                class_name: None,
+                image_base64: None,
+                x: None,
+                y: None,
+                width: None,
+                height: None,
+                reference_width: None,
+                reference_height: None,
+                threshold: None,
+                value: None,
+            }),
+            text: None,
+            secret_ref: None,
+            key: None,
+            expected_state: Some("ready".into()),
+            expected_locator: None,
+            timeout_ms: Some(3000),
+            max_attempts: Some(1),
+            permission_granted: Some(true),
+            target_process_id: None,
+            target_exe_path: None,
+            target_window_title: Some("MIMIC Automation Demo".into()),
+        };
+        let res6 = execute_step(target_window_id, step6).expect("Step 6 (click select server) must succeed");
+        assert!(res6.success);
+
+        // 7. Verify Game Ready State
+        let step7 = StepExecutionPayload {
+            id: Some("step-7-verify-ready".into()),
+            title: "Verify Game Ready".into(),
+            kind: "verify-state".into(),
+            action_type: Some("verify-state".into()),
+            locator: None,
+            text: None,
+            secret_ref: None,
+            key: None,
+            expected_state: Some("ready".into()),
+            expected_locator: None,
+            timeout_ms: Some(3000),
+            max_attempts: Some(1),
+            permission_granted: Some(true),
+            target_process_id: None,
+            target_exe_path: None,
+            target_window_title: Some("MIMIC Automation Demo".into()),
+        };
+        let res7 = execute_step(target_window_id, step7).expect("Step 7 (verify-state ready) must succeed");
+        assert!(res7.success);
+    }
+
+    #[test]
+    fn test_emergency_stop_during_wait_visible() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_emergency_stop();
+        start_demo().expect("demo target should open");
+        thread::sleep(Duration::from_millis(200));
+        let demo = list_windows()
+            .expect("window enumeration should work")
+            .into_iter()
+            .find(|window| window.is_demo)
+            .expect("demo window should be found");
+
+        // Spawn a background thread that triggers emergency stop after 100ms
+        thread::spawn(|| {
+            thread::sleep(Duration::from_millis(100));
+            emergency_stop();
+        });
+
+        let wait_step = StepExecutionPayload {
+            id: Some("wait-never-arriving".into()),
+            title: "Wait for Nonexistent Element".into(),
+            kind: "wait-visible".into(),
+            action_type: Some("wait-visible".into()),
+            locator: Some(LocatorPayload {
+                kind: "uia".into(),
+                automation_id: Some("ghost_id_9999".into()),
+                name: Some("Nonexistent Ghost".into()),
+                control_type: Some("Button".into()),
+                class_name: None,
+                image_base64: None,
+                x: None,
+                y: None,
+                width: None,
+                height: None,
+                reference_width: None,
+                reference_height: None,
+                threshold: None,
+                value: None,
+            }),
+            text: None,
+            secret_ref: None,
+            key: None,
+            expected_state: None,
+            expected_locator: None,
+            timeout_ms: Some(5000), // 5 seconds
+            max_attempts: Some(1),
+            permission_granted: Some(true),
+            target_process_id: None,
+            target_exe_path: None,
+            target_window_title: None,
+        };
+
+        let start = Instant::now();
+        let res = execute_step(demo.id, wait_step).expect("Should return step execution result struct");
+        let elapsed = start.elapsed();
+
+        assert_eq!(res.status, "stopped", "Emergency stop must cancel wait action");
+        assert!(elapsed < Duration::from_millis(1500), "Emergency stop must abort immediately (< 1.5s), elapsed was {:?}", elapsed);
+        reset_emergency_stop();
+    }
+
+    #[test]
+    fn test_process_path_mismatch_fails_closed() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        start_demo().expect("demo target should open");
+        thread::sleep(Duration::from_millis(100));
+        let demo = list_windows()
+            .expect("window enumeration should work")
+            .into_iter()
+            .find(|window| window.is_demo)
+            .expect("demo window should be found");
+
+        let mismatch_exe_step = StepExecutionPayload {
+            id: Some("mismatch-1".into()),
+            title: "Mismatched Executable Scope".into(),
+            kind: "verify-state".into(),
+            action_type: Some("verify-state".into()),
+            locator: None,
+            text: None,
+            secret_ref: None,
+            key: None,
+            expected_state: Some("login".into()),
+            expected_locator: None,
+            timeout_ms: Some(1000),
+            max_attempts: Some(1),
+            permission_granted: Some(true),
+            target_process_id: None,
+            target_exe_path: Some("C:\\Windows\\System32\\notepad.exe".into()), // Wrong executable
+            target_window_title: None,
+        };
+
+        let res = execute_step(demo.id, mismatch_exe_step);
+        assert!(res.is_err(), "Must fail closed if executable path does not match authorized binary");
+        assert!(res.unwrap_err().contains("does not match authorized"));
+    }
+
+    #[test]
+    fn test_phase_2_type_secret_with_windows_credential_manager() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_emergency_stop();
+        start_demo().expect("demo target should open");
+        thread::sleep(Duration::from_millis(150));
+        let demo = list_windows()
+            .expect("window enumeration should work")
+            .into_iter()
+            .find(|window| window.is_demo)
+            .expect("demo window should be found");
+
+        let hwnd = HWND(demo.id as *mut _);
+        unsafe {
+            reset_demo_window(hwnd);
+        }
+
+        // 1. Store secret in Windows Credential Manager
+        let vault_target = "mimic_phase2_test_user";
+        let vault_secret = "VaultSecurePass2026!";
+        crate::credentials::save_credential(vault_target, "test_account", vault_secret)
+            .expect("Saving credential to vault must succeed");
+
+        // 2. Execute type-secret referencing vault:mimic_phase2_test_user into Password edit control (ID 103)
+        let secret_step = StepExecutionPayload {
+            id: Some("sec-step-1".into()),
+            title: "Type Vault Password".into(),
+            kind: "type-secret".into(),
+            action_type: Some("type-secret".into()),
+            locator: Some(LocatorPayload {
+                kind: "uia".into(),
+                automation_id: Some("103".into()), // DEMO_EDIT_PASS_ID
+                name: None,
+                control_type: Some("Edit".into()),
+                class_name: None,
+                image_base64: None,
+                x: None,
+                y: None,
+                width: None,
+                height: None,
+                reference_width: None,
+                reference_height: None,
+                threshold: None,
+                value: None,
+            }),
+            text: None, // plaintext is omitted
+            secret_ref: Some(format!("vault:{vault_target}")),
+            key: None,
+            expected_state: None,
+            expected_locator: None,
+            timeout_ms: Some(3000),
+            max_attempts: Some(1),
+            permission_granted: Some(true),
+            target_process_id: None,
+            target_exe_path: None,
+            target_window_title: None,
+        };
+
+        let res = execute_step(demo.id, secret_step).expect("type-secret via vault must succeed");
+        assert!(res.success);
+
+        // 3. Verify password box received text
+        let pass_child = unsafe { GetDlgItem(Some(hwnd), DEMO_EDIT_PASS_ID as i32).unwrap() };
+        let mut buf = [0u16; 64];
+        let len = unsafe { GetWindowTextW(pass_child, &mut buf) };
+        let typed = String::from_utf16_lossy(&buf[..len as usize]);
+        assert_eq!(typed, vault_secret, "Password control must receive decrypted vault secret");
+
+        // 4. Clean up vault
+        let _ = crate::credentials::delete_credential(vault_target);
     }
 }

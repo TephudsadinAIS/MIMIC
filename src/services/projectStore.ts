@@ -1,4 +1,4 @@
-import type { CredentialReference, DemoState, Project, ProjectTarget, Workflow, WorkflowStep } from '../types';
+import type { AccountProfile, CredentialReference, Project, ProjectTarget, Workflow, WorkflowStep } from '../types';
 
 const STORAGE_KEY = 'mimic.project-metadata.v1';
 
@@ -7,32 +7,80 @@ export function createApplicationTarget(): ProjectTarget {
 }
 
 export function createDemoWorkflow(id: string): Workflow {
-  const step = (
-    suffix: string,
-    title: string,
-    kind: WorkflowStep['kind'],
-    expectedState: DemoState,
-    locatorName?: string,
-  ): WorkflowStep => ({
-    id: `${id}-${suffix}`,
-    title,
-    kind,
-    actionType: kind,
-    expectedState,
-    timeoutMs: 10_000,
-    maxAttempts: 2,
-    locator: locatorName ? { kind: 'uia', name: locatorName, controlType: 'Button' } : undefined,
-  });
-
   return {
     schemaVersion: 1,
     id: `${id}-workflow`,
-    name: 'Application Workflow',
+    name: 'End-to-End Login & Server Workflow',
     steps: [
-      step('wait-window', 'Wait for Login Window', 'wait-visible', 'login'),
-      step('click-login', 'Click Login Button', 'click', 'server', 'Continue to Server'),
-      step('select-server', 'Select Test Server', 'click', 'ready', 'Select Test Server'),
-      step('verify-ready', 'Verify Game Ready', 'verify-state', 'ready'),
+      {
+        id: `${id}-step-1-launch`,
+        title: 'Launch Application',
+        kind: 'launch-app',
+        actionType: 'launch-app',
+        text: 'DEMO',
+        expectedState: 'login',
+        timeoutMs: 10_000,
+        maxAttempts: 1,
+      },
+      {
+        id: `${id}-step-2-wait-login`,
+        title: 'Wait for Login Window',
+        kind: 'wait-visible',
+        actionType: 'wait-visible',
+        expectedState: 'login',
+        locator: { kind: 'uia', automationId: '101', name: 'Continue to Server', controlType: 'Button' },
+        timeoutMs: 10_000,
+        maxAttempts: 1,
+      },
+      {
+        id: `${id}-step-3-type-user`,
+        title: 'Type Username',
+        kind: 'type-text',
+        actionType: 'type-text',
+        text: 'player_one',
+        locator: { kind: 'uia', automationId: '102', controlType: 'Edit' },
+        timeoutMs: 5_000,
+        maxAttempts: 1,
+      },
+      {
+        id: `${id}-step-4-click-login`,
+        title: 'Click Continue Button',
+        kind: 'click',
+        actionType: 'click',
+        expectedState: 'server',
+        locator: { kind: 'uia', automationId: '101', name: 'Continue to Server', controlType: 'Button' },
+        timeoutMs: 5_000,
+        maxAttempts: 1,
+      },
+      {
+        id: `${id}-step-5-wait-server`,
+        title: 'Wait for Server Selection',
+        kind: 'wait-visible',
+        actionType: 'wait-visible',
+        expectedState: 'server',
+        locator: { kind: 'uia', automationId: '101', name: 'Select Test Server', controlType: 'Button' },
+        timeoutMs: 10_000,
+        maxAttempts: 1,
+      },
+      {
+        id: `${id}-step-6-click-server`,
+        title: 'Click Select Server Button',
+        kind: 'click',
+        actionType: 'click',
+        expectedState: 'ready',
+        locator: { kind: 'uia', automationId: '101', name: 'Select Test Server', controlType: 'Button' },
+        timeoutMs: 5_000,
+        maxAttempts: 1,
+      },
+      {
+        id: `${id}-step-7-verify-ready`,
+        title: 'Verify Game Ready',
+        kind: 'verify-state',
+        actionType: 'verify-state',
+        expectedState: 'ready',
+        timeoutMs: 5_000,
+        maxAttempts: 1,
+      },
     ],
   };
 }
@@ -93,6 +141,30 @@ function readCredentialReferences(value: unknown): CredentialReference[] {
     }));
 }
 
+function readAccounts(value: unknown): AccountProfile[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter(
+      (acc): acc is AccountProfile =>
+        typeof acc === 'object' &&
+        acc !== null &&
+        typeof acc.id === 'string' &&
+        typeof acc.name === 'string' &&
+        typeof acc.username === 'string' &&
+        typeof acc.credentialTarget === 'string' &&
+        typeof acc.isActive === 'boolean',
+    )
+    .map((acc) => ({
+      id: acc.id,
+      name: acc.name.slice(0, 100),
+      username: acc.username.slice(0, 100),
+      credentialTarget: acc.credentialTarget.slice(0, 200),
+      notes: typeof acc.notes === 'string' ? acc.notes.slice(0, 500) : undefined,
+      isActive: acc.isActive,
+      lastUsedAt: typeof acc.lastUsedAt === 'string' ? acc.lastUsedAt : undefined,
+    }));
+}
+
 // Only non-sensitive project metadata is stored here.
 // Never store raw passwords, private tokens, or full screen captures in localStorage.
 export function loadProjects(): Project[] {
@@ -116,6 +188,10 @@ export function loadProjects(): Project[] {
         workflow: readWorkflow((project as Partial<Project>).workflow, project.id),
         target: readTarget((project as Partial<Project>).target),
         credentialRefs: readCredentialReferences((project as Partial<Project>).credentialRefs),
+        accounts: readAccounts((project as Partial<Project>).accounts),
+        activeAccountId: typeof (project as Partial<Project>).activeAccountId === 'string'
+          ? (project as Partial<Project>).activeAccountId
+          : null,
       }));
   } catch {
     return [];

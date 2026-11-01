@@ -1,4 +1,4 @@
-export type View = 'home' | 'workspace' | 'teach' | 'skills' | 'settings';
+export type View = 'home' | 'workspace' | 'teach' | 'skills' | 'settings' | 'accounts';
 
 export interface Project {
   id: string;
@@ -8,6 +8,18 @@ export interface Project {
   workflow: Workflow;
   target: ProjectTarget;
   credentialRefs: CredentialReference[];
+  accounts?: AccountProfile[];
+  activeAccountId?: string | null;
+}
+
+export interface AccountProfile {
+  id: string;
+  name: string;
+  username: string;
+  credentialTarget: string; // references Windows Credential Manager target name
+  notes?: string;
+  isActive: boolean;
+  lastUsedAt?: string;
 }
 
 export type ProjectTargetKind = 'configured-application';

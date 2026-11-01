@@ -1,4 +1,5 @@
-mod automation;
+pub mod automation;
+pub mod credentials;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -170,6 +171,26 @@ fn automation_execute_step(
     automation::execute_step(target_window_id, step)
 }
 
+#[tauri::command]
+fn credential_save(target_name: String, username: String, secret: String) -> Result<(), String> {
+    credentials::save_credential(&target_name, &username, &secret)
+}
+
+#[tauri::command]
+fn credential_get(target_name: String) -> Result<credentials::CredentialEntry, String> {
+    credentials::get_credential(&target_name)
+}
+
+#[tauri::command]
+fn credential_delete(target_name: String) -> Result<(), String> {
+    credentials::delete_credential(&target_name)
+}
+
+#[tauri::command]
+fn credential_list() -> Result<Vec<credentials::CredentialSummary>, String> {
+    credentials::list_credentials()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -187,6 +208,10 @@ pub fn run() {
             automation_focus_window,
             automation_select_on_screen,
             automation_execute_step,
+            credential_save,
+            credential_get,
+            credential_delete,
+            credential_list,
         ])
         .run(tauri::generate_context!())
         .expect("error while running MIMIC");
