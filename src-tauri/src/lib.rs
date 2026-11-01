@@ -172,13 +172,26 @@ fn automation_execute_step(
 }
 
 #[tauri::command]
+fn automation_authorize_session(
+    target_window_id: isize,
+    target_exe_path: Option<String>,
+) -> Result<automation::NativeAuthorizedSession, String> {
+    automation::authorize_session(target_window_id, target_exe_path)
+}
+
+#[tauri::command]
+fn automation_revoke_session() {
+    automation::revoke_session();
+}
+
+#[tauri::command]
 fn credential_save(target_name: String, username: String, secret: String) -> Result<(), String> {
     credentials::save_credential(&target_name, &username, &secret)
 }
 
 #[tauri::command]
-fn credential_get(target_name: String) -> Result<credentials::CredentialEntry, String> {
-    credentials::get_credential(&target_name)
+fn credential_check(target_name: String) -> Result<credentials::CredentialMetadata, String> {
+    credentials::check_credential(&target_name)
 }
 
 #[tauri::command]
@@ -208,8 +221,10 @@ pub fn run() {
             automation_focus_window,
             automation_select_on_screen,
             automation_execute_step,
+            automation_authorize_session,
+            automation_revoke_session,
             credential_save,
-            credential_get,
+            credential_check,
             credential_delete,
             credential_list,
         ])

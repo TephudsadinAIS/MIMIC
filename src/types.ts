@@ -20,6 +20,48 @@ export interface AccountProfile {
   notes?: string;
   isActive: boolean;
   lastUsedAt?: string;
+  requiresVaultSetup?: boolean;
+}
+
+export type AccountQueueStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
+
+export interface AccountQueueItem {
+  account: AccountProfile;
+  status: AccountQueueStatus;
+  error?: string;
+  durationMs?: number;
+  currentStepIndex?: number;
+  totalSteps?: number;
+}
+
+export interface SequentialRunConfig {
+  stopOnFailure: boolean;
+  pauseBetweenAccounts: boolean;
+}
+
+export interface ProjectExportBundle {
+  schemaVersion: 1;
+  exportedAt: string;
+  mimicVersion: string;
+  project: {
+    id: string;
+    name: string;
+    description: string;
+    workflow: Workflow;
+    target: {
+      kind: 'configured-application';
+      executablePath: string;
+      windowTitleContains: string;
+    };
+    accounts: Array<{
+      id: string;
+      name: string;
+      username: string;
+      credentialTarget: string;
+      notes?: string;
+      isActive: boolean;
+    }>;
+  };
 }
 
 export type ProjectTargetKind = 'configured-application';

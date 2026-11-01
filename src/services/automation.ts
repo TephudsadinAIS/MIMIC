@@ -84,3 +84,34 @@ export async function resetEmergencyStop(): Promise<void> {
   requireDesktop();
   return invoke<void>('automation_reset_emergency_stop');
 }
+
+export interface NativeAuthorizedSession {
+  sessionId: string;
+  targetWindowId: number;
+  targetProcessId: number;
+  targetExePath?: string;
+  createdAt: number;
+  isActive: boolean;
+}
+
+export async function authorizeSession(
+  targetWindowId: number,
+  targetExePath?: string,
+): Promise<NativeAuthorizedSession> {
+  if (!isDesktop()) {
+    return {
+      sessionId: `mock_session_${Date.now()}`,
+      targetWindowId,
+      targetProcessId: 1234,
+      targetExePath,
+      createdAt: Date.now(),
+      isActive: true,
+    };
+  }
+  return invoke<NativeAuthorizedSession>('automation_authorize_session', { targetWindowId, targetExePath });
+}
+
+export async function revokeSession(): Promise<void> {
+  if (!isDesktop()) return;
+  return invoke<void>('automation_revoke_session');
+}

@@ -1,23 +1,26 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import {
   Activity, ArrowRight, BookOpen, Bot, Check, CheckCircle2, ChevronRight, CircleHelp,
-  Cpu, Crosshair, Eye, FolderOpen, Home, KeyRound, LockKeyhole,
+  Cpu, Crosshair, Download, Eye, FolderOpen, Home, KeyRound, ListOrdered, LockKeyhole,
   Monitor, Pause, Play, Plus, RefreshCw, Send,
-  Settings2, ShieldCheck, Sparkles, Square, Trash2, Users, Video, WandSparkles, X,
+  Settings2, ShieldCheck, SkipForward, Sparkles, Square, Trash2, Upload, Users, Video, WandSparkles, X,
 } from 'lucide-react';
 import type {
-  AccountProfile, ActionType, AiStatus, ChatMessage, ConnectionState, Locator,
+  AccountProfile, AccountQueueItem, ActionType, AiStatus, ChatMessage, ConnectionState, Locator,
   Project, ProjectTarget, SelectOnScreenResult, StepExecutionResult, TargetWindow,
   View, WorkflowRunEvent, WorkflowRunPhase, WorkflowStep,
 } from './types';
 import {
-  executeStep, focusWindow, launchApplication, listTargetWindows,
-  pickExecutable, requestEmergencyStop, resetEmergencyStop,
+  authorizeSession, executeStep, focusWindow, launchApplication, listTargetWindows,
+  pickExecutable, requestEmergencyStop, resetEmergencyStop, revokeSession,
   selectOnScreen, startDemoTarget,
 } from './services/automation';
 import { chatWithLocalAi, checkLocalAi, isDesktop } from './services/localAi';
-import { createApplicationTarget, createDemoWorkflow, loadProjects, saveProjects } from './services/projectStore';
-import { deleteCredential, getCredential, saveCredential } from './services/credentialService';
+import {
+  createApplicationTarget, createDemoWorkflow, exportProjectBundle,
+  importProjectBundle, loadProjects, saveProjects,
+} from './services/projectStore';
+import { checkCredential, deleteCredential, saveCredential } from './services/credentialService';
 
 const newId = () => crypto.randomUUID();
 
@@ -105,6 +108,20 @@ export default function App() {
   const [accountNotes, setAccountNotes] = useState('');
   const [accountFeedback, setAccountFeedback] = useState<{ message: string; success: boolean } | null>(null);
   const [testingVaultTarget, setTestingVaultTarget] = useState<string | null>(null);
+
+  // Sequential Account Queue State (Priority 3)
+  const [selectedAccountIds, setSelectedAccountIds] = useState<string[]>([]);
+  const [stopOnFailure, setStopOnFailure] = useState(true);
+  const [pauseBetweenAccounts, setPauseBetweenAccounts] = useState(false);
+  const [accountQueue, setAccountQueue] = useState<AccountQueueItem[]>([]);
+  const [currentQueueIndex, setCurrentQueueIndex] = useState<number>(-1);
+  const [isSequentialRunning, setIsSequentialRunning] = useState(false);
+  const skipAccountRequested = useRef(false);
+
+  // Import / Export State (Priority 4)
+  const [importModalOpen, setImportModalOpen] = useState(false);
+  const [importedProjectDraft, setImportedProjectDraft] = useState<Project | null>(null);
+  const [importSetupAccounts, setImportSetupAccounts] = useState<{ id: string; name: string; username: string; target: string; passwordInput: string; saved: boolean }[]>([]);
 
   const project = projects.find((item) => item.id === selectedId) ?? null;
   const selectedModels: string[] = connection.phase === 'ready' ? connection.status.models : [];
@@ -407,6 +424,9 @@ export default function App() {
         targetExePath: matchedWin?.exePath || project?.target.executablePath,
         targetWindowTitle: project?.target.windowTitleContains?.trim() || undefined,
       };
+      // Native Session Security: Authorize target session
+      await authorizeSession(targetWindowId ?? 0, scope.targetExePath);
+
       const result: StepExecutionResult = await executeStep(targetWindowId ?? 0, resolvedStep, permissionGranted, scope);
       if (result.targetWindowId && result.targetWindowId !== targetWindowId) {
         setTargetWindowId(result.targetWindowId);
@@ -421,6 +441,9 @@ export default function App() {
       setStepTestFeedback({ message: String(error), success: false });
       addRunEvent(stepToTest.id, String(error), 'error');
     } finally {
+      if (!isSequentialRunning) {
+        await revokeSession().catch(() => {});
+      }
       setAutomationBusy(false);
     }
   }
@@ -454,24 +477,34 @@ export default function App() {
     return !runControl.current.stopped;
   }
 
-  async function runWorkflow() {
-    if (!project || !permissionGranted || automationBusy) return;
+  async function runWorkflow(accountOverride?: AccountProfile): Promise<boolean> {
+    if (!project || !permissionGranted || (automationBusy && !isSequentialRunning)) return false;
     const firstStepIsLaunch = project.workflow.steps[0]?.actionType === 'launch-app' || project.workflow.steps[0]?.kind === 'launch-app';
     if (!firstStepIsLaunch && targetWindowId === null) {
       setAutomationMessage('กรุณาเลือก Target Window ก่อนสั่ง Run');
-      return;
+      return false;
     }
 
     runControl.current = { stopped: false, paused: false };
     setAutomationBusy(true);
     setRunPhase('running');
-    setRunEvents([]);
-    addRunEvent('workflow', `เริ่มต้นรัน Workflow: ${project.workflow.name} (${project.workflow.steps.length} ขั้นตอน)`, 'info');
+    if (!isSequentialRunning) {
+      setRunEvents([]);
+    }
+    const currentAccount = accountOverride || project.accounts?.find((a) => a.id === project.activeAccountId);
+    const accountLabel = currentAccount ? ` [Account: ${currentAccount.name} (${currentAccount.username})]` : '';
+    addRunEvent('workflow', `เริ่มต้นรัน Workflow: ${project.workflow.name}${accountLabel} (${project.workflow.steps.length} ขั้นตอน)`, 'info');
 
     let currentWindowId = targetWindowId ?? 0;
 
     try {
       await resetEmergencyStop();
+      const matchedWin = targetWindows.find((w) => w.id === currentWindowId);
+      const exeScope = matchedWin?.exePath || project.target.executablePath;
+
+      // Native Session Security: Authorize session
+      await authorizeSession(currentWindowId, exeScope);
+
       // Ensure target window is in focus if window already exists
       if (currentWindowId > 0) {
         try {
@@ -482,6 +515,9 @@ export default function App() {
       }
 
       for (let i = 0; i < project.workflow.steps.length; i++) {
+        if (skipAccountRequested.current) {
+          throw new Error('Account skipped by user');
+        }
         const step = project.workflow.steps[i]!;
         setRunStepId(step.id);
         if (!await waitForResume()) throw new Error('Workflow หยุดโดยผู้ใช้');
@@ -492,27 +528,28 @@ export default function App() {
         let lastError = '';
 
         for (let attempt = 1; attempt <= Math.max(1, step.maxAttempts); attempt++) {
+          if (skipAccountRequested.current) {
+            throw new Error('Account skipped by user');
+          }
           if (!await waitForResume()) throw new Error('Workflow หยุดโดยผู้ใช้');
           try {
-            const activeAccount = project.accounts?.find((a) => a.id === project.activeAccountId);
             let resolvedText = step.text;
             let resolvedSecretRef = step.secretRef;
 
-            if (activeAccount) {
+            if (currentAccount) {
               if (step.actionType === 'type-text' || step.kind === 'type-text') {
                 if (!resolvedText || resolvedText === '{username}' || resolvedText.trim() === '') {
-                  resolvedText = activeAccount.username;
+                  resolvedText = currentAccount.username;
                 } else if (resolvedText.includes('{username}')) {
-                  resolvedText = resolvedText.replace(/\{username\}/g, activeAccount.username);
+                  resolvedText = resolvedText.replace(/\{username\}/g, currentAccount.username);
                 }
               } else if (step.actionType === 'type-secret' || step.kind === 'type-secret') {
                 if (!resolvedSecretRef || resolvedSecretRef.trim() === '') {
-                  resolvedSecretRef = `vault:${activeAccount.credentialTarget}`;
+                  resolvedSecretRef = `vault:${currentAccount.credentialTarget}`;
                 }
               }
             }
 
-            // Execute step using Shared Native Engine
             const stepToRun: WorkflowStep = {
               ...step,
               text: (step.actionType === 'launch-app' || step.kind === 'launch-app') && (!step.text || step.text.trim().length === 0)
@@ -521,10 +558,10 @@ export default function App() {
               secretRef: resolvedSecretRef,
             };
 
-            const matchedWin = targetWindows.find((w) => w.id === currentWindowId);
+            const curWin = targetWindows.find((w) => w.id === currentWindowId);
             const scope = {
-              targetProcessId: matchedWin?.processId,
-              targetExePath: matchedWin?.exePath || project.target.executablePath,
+              targetProcessId: curWin?.processId,
+              targetExePath: curWin?.exePath || project.target.executablePath,
               targetWindowTitle: project.target.windowTitleContains?.trim() || undefined,
             };
 
@@ -560,15 +597,177 @@ export default function App() {
       setRunPhase('completed');
       setAutomationMessage('✓ Workflow ดำเนินการเสร็จสมบูรณ์และตรวจสอบสถานะผ่านทุกขั้นตอน');
       addRunEvent('workflow', 'Workflow completed with every expected state verified.', 'success');
+      return true;
     } catch (error) {
       const stopped = runControl.current.stopped;
       setRunPhase(stopped ? 'stopped' : 'failed');
       setAutomationMessage(String(error));
       addRunEvent('workflow', `Workflow halted: ${error}`, 'error');
+      return false;
     } finally {
       setRunStepId(null);
-      setAutomationBusy(false);
+      if (!isSequentialRunning) {
+        setAutomationBusy(false);
+        await revokeSession().catch(() => {});
+      }
     }
+  }
+
+  // Sequential Workflow Execution (Priority 3)
+  async function runSequentialWorkflow() {
+    if (!project || !permissionGranted || automationBusy) return;
+    const allAccounts = project.accounts || [];
+    const accountsToRun = selectedAccountIds.length > 0
+      ? allAccounts.filter((a) => selectedAccountIds.includes(a.id))
+      : allAccounts;
+
+    if (accountsToRun.length === 0) {
+      setAutomationMessage('กรุณาเลือก Account Profile ก่อนสั่งรันแบบ Sequential');
+      return;
+    }
+
+    setIsSequentialRunning(true);
+    setAutomationBusy(true);
+    skipAccountRequested.current = false;
+    setRunEvents([]);
+
+    const initialQueue: AccountQueueItem[] = accountsToRun.map((account) => ({
+      account,
+      status: 'pending',
+    }));
+    setAccountQueue(initialQueue);
+    addRunEvent('sequential', `=== เริ่มต้น Sequential Run สำหรับ ${accountsToRun.length} บัญชี ===`, 'info');
+
+    for (let i = 0; i < accountsToRun.length; i++) {
+      setCurrentQueueIndex(i);
+      const acct = accountsToRun[i]!;
+
+      setAccountQueue((prev) =>
+        prev.map((item, idx) => (idx === i ? { ...item, status: 'running' } : item))
+      );
+
+      handleSetActiveAccount(acct.id);
+
+      const success = await runWorkflow(acct);
+
+      if (skipAccountRequested.current) {
+        setAccountQueue((prev) =>
+          prev.map((item, idx) => (idx === i ? { ...item, status: 'skipped', message: 'ผู้ใช้สั่งข้าม' } : item))
+        );
+        addRunEvent('sequential', `ข้ามบัญชี ${acct.name} (${acct.username}) ตามคำขอ`, 'warning');
+        skipAccountRequested.current = false;
+        continue;
+      }
+
+      if (success) {
+        setAccountQueue((prev) =>
+          prev.map((item, idx) => (idx === i ? { ...item, status: 'completed', message: 'สำเร็จ' } : item))
+        );
+        setProjects((current) => current.map((item) => item.id !== project.id ? item : {
+          ...item,
+          accounts: (item.accounts || []).map((a) => a.id === acct.id ? { ...a, lastUsedAt: new Date().toISOString() } : a),
+        }));
+      } else {
+        setAccountQueue((prev) =>
+          prev.map((item, idx) => (idx === i ? { ...item, status: 'failed', message: 'ล้มเหลว' } : item))
+        );
+        if (stopOnFailure) {
+          addRunEvent('sequential', `Sequential Run หยุดทำงาน: บัญชี "${acct.name}" ไม่สำเร็จ (เปิด Stop on failure)`, 'error');
+          break;
+        }
+      }
+
+      if (pauseBetweenAccounts && i < accountsToRun.length - 1) {
+        addRunEvent('sequential', 'พักการทำงานชั่วคราวระหว่างบัญชี — ตรวจสอบผลลัพธ์แล้วกด Resume เมื่อพร้อม', 'warning');
+        runControl.current.paused = true;
+        setRunPhase('paused');
+        const resumeSuccess = await waitForResume();
+        if (!resumeSuccess) {
+          addRunEvent('sequential', 'Sequential Run ถูกยกเลิกโดยผู้ใช้', 'error');
+          break;
+        }
+      }
+    }
+
+    await revokeSession().catch(() => {});
+    setIsSequentialRunning(false);
+    setAutomationBusy(false);
+    setCurrentQueueIndex(-1);
+    addRunEvent('sequential', '=== สิ้นสุดกระบวนการ Sequential Run ===', 'info');
+  }
+
+  function skipCurrentAccount() {
+    skipAccountRequested.current = true;
+    runControl.current.stopped = true;
+    addRunEvent('control', 'สั่งข้ามบัญชีปัจจุบัน (Skip account)', 'warning');
+  }
+
+  // Export / Import Handlers (Priority 4)
+  function handleExportProject() {
+    if (!project) return;
+    const jsonStr = exportProjectBundle(project);
+    const blob = new Blob([jsonStr], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `${project.name.toLowerCase().replace(/[^a-z0-9_-]/g, '_')}_bundle.mimic.json`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+    URL.revokeObjectURL(url);
+    setAutomationMessage(`Export โปรเจกต์ "${project.name}" สำเร็จ (ปลอดภัย 100%: ไม่มีรหัสผ่านในไฟล์ JSON)`);
+  }
+
+  function handleImportFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const content = event.target?.result;
+      if (typeof content !== 'string') return;
+      try {
+        const res = importProjectBundle(content);
+        setImportedProjectDraft(res.project);
+      setImportSetupAccounts(
+        (res.project.accounts || []).map((acc) => ({
+          id: acc.id,
+          name: acc.name,
+          username: acc.username,
+          target: acc.credentialTarget,
+          passwordInput: '',
+          saved: false,
+        }))
+      );
+      setImportModalOpen(true);
+      } catch (err) {
+        alert(String(err));
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  }
+
+  async function handleSaveImportAccountVault(index: number) {
+    const item = importSetupAccounts[index];
+    if (!item || !item.passwordInput) return;
+    try {
+      await saveCredential(item.target, item.username, item.passwordInput);
+      setImportSetupAccounts((prev) =>
+        prev.map((acc, idx) => (idx === index ? { ...acc, saved: true, passwordInput: '' } : acc))
+      );
+    } catch (err) {
+      alert(`บันทึกลง Windows Credential Manager ล้มเหลว: ${err}`);
+    }
+  }
+
+  function handleFinishProjectImport() {
+    if (!importedProjectDraft) return;
+    setProjects((current) => [...current, importedProjectDraft]);
+    setSelectedId(importedProjectDraft.id);
+    setView('workspace');
+    setImportModalOpen(false);
+    setImportedProjectDraft(null);
+    setAutomationMessage(`นำเข้าโปรเจกต์ "${importedProjectDraft.name}" เรียบร้อยแล้ว`);
   }
 
   function pauseOrResumeWorkflow() {
@@ -662,9 +861,9 @@ export default function App() {
   async function handleTestVaultRetrieval(targetName: string) {
     setTestingVaultTarget(targetName);
     try {
-      const entry = await getCredential(targetName);
+      const meta = await checkCredential(targetName);
       setAccountFeedback({
-        message: `✓ ตรวจสอบ Windows Credential Manager สำเร็จ: พบบัญชี "${entry.username}" (Vault Target: ${entry.targetName})`,
+        message: `✓ ตรวจสอบ Windows Credential Manager สำเร็จ: พบบัญชี "${meta.username}" (Target: ${meta.targetName}) [ไม่มี Plaintext Secret ส่งผ่าน IPC]`,
         success: true,
       });
     } catch (err) {
@@ -821,6 +1020,10 @@ export default function App() {
               <div className="hero-buttons">
                 <button type="button" className="primary-button" onClick={() => setCreating(true)}><Plus size={18} /> สร้าง Project <ArrowRight size={17} /></button>
                 <button type="button" className="secondary-button" onClick={() => setView('settings')}><Activity size={17} /> ตรวจสอบ Local AI</button>
+                <label className="secondary-button" style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', cursor: 'pointer', margin: 0 }}>
+                  <Upload size={17} /> นำเข้า Project (.json)
+                  <input type="file" accept=".json" onChange={handleImportFileChange} style={{ display: 'none' }} />
+                </label>
               </div>
             </div>
             <div className="hero-visual" aria-hidden="true">
@@ -878,6 +1081,25 @@ export default function App() {
                 </button>
               );
             })()}
+            {project.accounts && project.accounts.length > 0 && (
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => void runSequentialWorkflow()}
+                disabled={automationBusy || isSequentialRunning || !permissionGranted || (!project.workflow.steps[0]?.actionType?.includes('launch') && targetWindowId === null)}
+                title="รัน Workflow ตามลำดับ Account Profiles ที่เลือก"
+                style={{ background: '#1c2e4a', borderColor: '#3b82f6', color: '#93c5fd' }}
+              >
+                <ListOrdered size={15} /> Run Sequential {selectedAccountIds.length > 0 ? `(${selectedAccountIds.length})` : `(${project.accounts.length})`}
+              </button>
+            )}
+            <button type="button" className="secondary-button" onClick={handleExportProject} title="ส่งออก Workflow และ Account Metadata สำหรับเครื่องอื่น">
+              <Download size={14} /> Export
+            </button>
+            <label className="secondary-button" style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', cursor: 'pointer', margin: 0 }} title="นำเข้าโปรเจกต์จากไฟล์ JSON">
+              <Upload size={14} /> Import
+              <input type="file" accept=".json" onChange={handleImportFileChange} style={{ display: 'none' }} />
+            </label>
             <button type="button" onClick={pauseOrResumeWorkflow} disabled={runPhase !== 'running' && runPhase !== 'paused'}>
               {runPhase === 'paused' ? <><Play size={15} /> Resume</> : <><Pause size={15} /> Pause</>}
             </button>
@@ -1038,6 +1260,49 @@ export default function App() {
                 </span>
               </div>
               <div className="screen-placeholder">
+                {/* SEQUENTIAL RUN QUEUE MONITOR (Priority 3) */}
+                {accountQueue.length > 0 && (
+                  <div style={{ width: '100%', maxWidth: 520, background: '#122033', border: '1px solid #233b5c', borderRadius: 8, padding: 12, marginBottom: 12 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                      <span style={{ fontSize: 12, fontWeight: 700, color: '#93c5fd', display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <ListOrdered size={14} /> Sequential Queue ({accountQueue.filter(q => q.status === 'completed').length}/{accountQueue.length} เสร็จสิ้น)
+                      </span>
+                      {isSequentialRunning && (
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          style={{ padding: '3px 8px', fontSize: 11, background: '#3b2512', color: '#fcd34d', borderColor: '#78350f' }}
+                          onClick={skipCurrentAccount}
+                          title="ข้ามบัญชีที่กำลังรันอยู่ไปบัญชีถัดไป"
+                        >
+                          <SkipForward size={13} /> Skip Account
+                        </button>
+                      )}
+                    </div>
+                    <div style={{ display: 'grid', gap: 6, maxHeight: 130, overflowY: 'auto' }}>
+                      {accountQueue.map((item, idx) => (
+                        <div
+                          key={item.account.id}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            padding: '4px 8px',
+                            borderRadius: 6,
+                            background: idx === currentQueueIndex ? '#1e3a5f' : '#0e1724',
+                            border: idx === currentQueueIndex ? '1px solid #3b82f6' : '1px solid transparent',
+                            fontSize: 11,
+                          }}
+                        >
+                          <span><strong>{idx + 1}. {item.account.name}</strong> ({item.account.username})</span>
+                          <span className={'chip ' + (item.status === 'completed' ? 'verify' : item.status === 'running' ? 'action' : item.status === 'failed' ? 'error' : 'subtle')} style={{ fontSize: 9, padding: '2px 6px' }}>
+                            {item.status}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
                 <div className="screen-art">
                   <Monitor size={51} strokeWidth={1.25} />
                   <span className="screen-glint" />
@@ -1074,6 +1339,43 @@ export default function App() {
             บริหารจัดการบัญชีผู้ใช้แบบ Dynamic โดยไม่จำกัดจำนวนบัญชี (ไม่มีการ Hardcode บัญชีตายตัว)
             และจัดเก็บรหัสผ่านใน Windows Credential Manager อย่างปลอดภัย ไม่บันทึก Plaintext Secret ลงไฟล์โปรเจกต์
           </p>
+          {project && (
+            <div style={{ display: 'flex', gap: 16, alignItems: 'center', background: '#122338', border: '1px solid #233e63', borderRadius: 8, padding: '10px 14px', marginTop: 14, flexWrap: 'wrap' }}>
+              <span style={{ fontSize: 12, fontWeight: 700, color: '#93c5fd', display: 'flex', alignItems: 'center', gap: 6 }}>
+                <ListOrdered size={14} /> Sequential Execution Settings:
+              </span>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#e0efff', cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={stopOnFailure}
+                  onChange={(e) => setStopOnFailure(e.target.checked)}
+                />
+                Stop on Failure (หยุดเมื่อมีบัญชีผิดพลาด)
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#e0efff', cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={pauseBetweenAccounts}
+                  onChange={(e) => setPauseBetweenAccounts(e.target.checked)}
+                />
+                Pause Between Accounts (พักระหว่างบัญชี)
+              </label>
+              <button
+                type="button"
+                className="secondary-button"
+                style={{ padding: '3px 8px', fontSize: 11, marginLeft: 'auto' }}
+                onClick={() => {
+                  if (selectedAccountIds.length === (project.accounts || []).length) {
+                    setSelectedAccountIds([]);
+                  } else {
+                    setSelectedAccountIds((project.accounts || []).map(a => a.id));
+                  }
+                }}
+              >
+                {selectedAccountIds.length === (project.accounts || []).length ? 'Deselect All' : 'Select All for Sequential'}
+              </button>
+            </div>
+          )}
 
           <div style={{ display: 'grid', gridTemplateColumns: 'minmax(320px, 1fr) minmax(360px, 1.2fr)', gap: 20, marginTop: 24 }}>
             {/* ADD ACCOUNT FORM */}
@@ -1196,6 +1498,18 @@ export default function App() {
                       >
                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <input
+                              type="checkbox"
+                              checked={selectedAccountIds.length === 0 || selectedAccountIds.includes(acc.id)}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setSelectedAccountIds((prev) => [...prev, acc.id]);
+                                } else {
+                                  setSelectedAccountIds((prev) => prev.filter(id => id !== acc.id));
+                                }
+                              }}
+                              title="เลือกสำหรับ Sequential Run"
+                            />
                             <strong>{acc.name}</strong>
                             {isActive && <span className="chip verify">Active Profile</span>}
                           </div>
@@ -1572,5 +1886,105 @@ export default function App() {
         <div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setCreating(false)}>Cancel</button><button type="submit" className="primary-button" disabled={!projectName.trim()}><Check size={17} /> Create Project</button></div>
       </form>
     </div>}
+  
+    {/* IMPORT PROJECT SETUP MODAL (Priority 4) */}
+    {importModalOpen && importedProjectDraft && (
+      <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) setImportModalOpen(false); }}>
+        <div className="create-modal" style={{ maxWidth: 540 }}>
+          <div className="modal-top">
+            <div className="modal-icon"><Upload size={22} /></div>
+            <button type="button" className="icon-button" onClick={() => setImportModalOpen(false)} aria-label="ปิด"><X size={18} /></button>
+          </div>
+          <span className="section-eyebrow">PORTABILITY & SETUP</span>
+          <h2>Setup Imported Project</h2>
+          <p>
+            นำเข้าโปรเจกต์ <strong>{importedProjectDraft.name}</strong> ตรวจสอบ Executable Path บนเครื่องนี้ และบันทึกรหัสผ่านลง Windows Credential Manager
+          </p>
+
+          <div className="form-field" style={{ marginTop: 12 }}>
+            <label>Target Executable Path บนเครื่องนี้</label>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input
+                value={importedProjectDraft.target.executablePath || ''}
+                onChange={(e) => setImportedProjectDraft({
+                  ...importedProjectDraft,
+                  target: { ...importedProjectDraft.target, executablePath: e.target.value }
+                })}
+                placeholder="C:\Games\Yulgang\Client.exe หรือ DEMO"
+                style={{ flex: 1 }}
+              />
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={async () => {
+                  const picked = await pickExecutable();
+                  if (picked) {
+                    setImportedProjectDraft({
+                      ...importedProjectDraft,
+                      target: { ...importedProjectDraft.target, executablePath: picked }
+                    });
+                  }
+                }}
+              >
+                Browse EXE
+              </button>
+            </div>
+          </div>
+
+          <div style={{ marginTop: 14 }}>
+            <strong style={{ fontSize: 13, color: '#93c5fd' }}>Account Credentials Setup:</strong>
+            <p style={{ fontSize: 11, color: '#7e9cbf', margin: '4px 0 10px' }}>
+              ไฟล์ JSON นำเข้าไม่มี Plaintext Password กรุณาตั้งรหัสผ่านสำหรับแต่ละบัญชีเพื่อบันทึกลง Windows Vault บนเครื่องนี้
+            </p>
+            {importSetupAccounts.length === 0 ? (
+              <p style={{ fontSize: 12, color: '#94a3b8' }}>ไม่มีบัญชีที่ต้องตั้งค่าในโปรเจกต์นี้</p>
+            ) : (
+              <div style={{ display: 'grid', gap: 10, maxHeight: 200, overflowY: 'auto' }}>
+                {importSetupAccounts.map((acc, idx) => (
+                  <div key={acc.id} style={{ background: '#0e1724', border: '1px solid #1f334d', borderRadius: 6, padding: 8 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                      <span style={{ fontSize: 12, fontWeight: 600 }}>{acc.name} ({acc.username})</span>
+                      {acc.saved && <span className="chip verify" style={{ fontSize: 10 }}>Saved to Vault</span>}
+                    </div>
+                    {!acc.saved ? (
+                      <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
+                        <input
+                          type="password"
+                          placeholder="กรอกรหัสผ่านสำหรับเครื่องนี้"
+                          value={acc.passwordInput}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setImportSetupAccounts((prev) => prev.map((item, i) => i === idx ? { ...item, passwordInput: val } : item));
+                          }}
+                          style={{ flex: 1, padding: '4px 8px', fontSize: 12 }}
+                        />
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          style={{ padding: '4px 8px', fontSize: 11 }}
+                          disabled={!acc.passwordInput}
+                          onClick={() => void handleSaveImportAccountVault(idx)}
+                        >
+                          Save
+                        </button>
+                      </div>
+                    ) : (
+                      <span style={{ fontSize: 11, color: '#86efac' }}>✓ พร้อมใช้งานบนเครื่องนี้แล้ว</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="modal-actions" style={{ marginTop: 18 }}>
+            <button type="button" className="secondary-button" onClick={() => setImportModalOpen(false)}>Cancel</button>
+            <button type="button" className="primary-button" onClick={handleFinishProjectImport}>
+              <Check size={16} /> Finish & Open Project
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
   </div>;
 }

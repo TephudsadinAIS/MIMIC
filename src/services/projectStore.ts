@@ -1,4 +1,4 @@
-import type { AccountProfile, CredentialReference, Project, ProjectTarget, Workflow, WorkflowStep } from '../types';
+import type { AccountProfile, CredentialReference, Project, ProjectExportBundle, ProjectTarget, Workflow, WorkflowStep } from '../types';
 
 const STORAGE_KEY = 'mimic.project-metadata.v1';
 
@@ -233,4 +233,90 @@ export function saveProjects(projects: Project[]): void {
   } catch {
     // Storage may be disabled; app remains usable for the current session.
   }
+}
+
+export function exportProjectBundle(project: Project): string {
+  const bundle: ProjectExportBundle = {
+    schemaVersion: 1,
+    exportedAt: new Date().toISOString(),
+    mimicVersion: '0.1.0',
+    project: {
+      id: project.id,
+      name: project.name,
+      description: project.description,
+      workflow: {
+        ...project.workflow,
+        steps: project.workflow.steps.map(sanitizeStepForStorage),
+      },
+      target: {
+        kind: 'configured-application',
+        executablePath: project.target.executablePath,
+        windowTitleContains: project.target.windowTitleContains,
+      },
+      accounts: (project.accounts || []).map((acc) => ({
+        id: acc.id,
+        name: acc.name,
+        username: acc.username,
+        // Opaque vault reference label only, never plaintext
+        credentialTarget: acc.credentialTarget,
+        notes: acc.notes,
+        isActive: acc.isActive,
+      })),
+    },
+  };
+  return JSON.stringify(bundle, null, 2);
+}
+
+export interface ImportResult {
+  project: Project;
+  needsRemap: boolean;
+  needsVaultSetup: boolean;
+}
+
+export function importProjectBundle(jsonString: string): ImportResult {
+  const parsed = JSON.parse(jsonString) as unknown;
+  if (typeof parsed !== 'object' || parsed === null) {
+    throw new Error('Invalid project file format (not a JSON object)');
+  }
+
+  const bundle = parsed as Partial<ProjectExportBundle>;
+  if (bundle.schemaVersion !== 1 || !bundle.project) {
+    throw new Error('Unsupported project export schema version');
+  }
+
+  const rawProj = bundle.project;
+  const newProjectId = crypto.randomUUID();
+  const rawTarget = rawProj.target || { kind: 'configured-application', executablePath: '', windowTitleContains: '' };
+
+  const importedAccounts: AccountProfile[] = (rawProj.accounts || []).map((acc) => ({
+    id: crypto.randomUUID(),
+    name: acc.name,
+    username: acc.username,
+    credentialTarget: `MIMIC:${rawProj.name?.toLowerCase().replace(/[^a-z0-9]/g, '_') || 'app'}:${acc.username}`,
+    notes: acc.notes,
+    isActive: acc.isActive ?? true,
+    requiresVaultSetup: true, // Imported from another machine, needs password entry into local vault
+  }));
+
+  const project: Project = {
+    id: newProjectId,
+    name: rawProj.name ? `${rawProj.name} (Imported)` : 'Imported Project',
+    description: rawProj.description || '',
+    createdAt: new Date().toISOString(),
+    workflow: readWorkflow(rawProj.workflow, newProjectId),
+    target: {
+      kind: 'configured-application',
+      executablePath: rawTarget.executablePath || '',
+      windowTitleContains: rawTarget.windowTitleContains || '',
+      targetWindowId: null,
+    },
+    credentialRefs: [],
+    accounts: importedAccounts,
+    activeAccountId: importedAccounts[0]?.id ?? null,
+  };
+
+  const needsRemap = !project.target.executablePath || project.target.executablePath.length > 0;
+  const needsVaultSetup = importedAccounts.length > 0;
+
+  return { project, needsRemap, needsVaultSetup };
 }

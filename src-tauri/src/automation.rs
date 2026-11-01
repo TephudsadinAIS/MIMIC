@@ -12,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 use std::{
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering},
         Mutex, Once,
     },
     thread,
@@ -36,33 +36,35 @@ use windows::{
             },
             LibraryLoader::GetModuleHandleW,
             ProcessStatus::GetModuleFileNameExW,
-            Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ},
+            Threading::{GetCurrentThreadId, OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ},
         },
         UI::{
             Accessibility::{
                 CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationTreeWalker,
             },
             Input::KeyboardAndMouse::{
-                ReleaseCapture, SendInput, SetCapture, INPUT, INPUT_0, INPUT_KEYBOARD,
-                KEYBDINPUT, KEYEVENTF_KEYUP, VK_BACK, VK_ESCAPE, VK_RETURN, VK_SPACE, VK_TAB,
+                GetKeyState, ReleaseCapture, SendInput, SetCapture, INPUT, INPUT_0, INPUT_KEYBOARD,
+                KEYBDINPUT, KEYEVENTF_KEYUP, VK_BACK, VK_CONTROL, VK_ESCAPE, VK_PAUSE, VK_RETURN,
+                VK_SHIFT, VK_SPACE, VK_TAB,
             },
             Shell::{
                 FileOpenDialog, IFileOpenDialog, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM,
                 SIGDN_FILESYSPATH,
             },
             WindowsAndMessaging::{
-                CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, EnumChildWindows,
-                EnumWindows, FindWindowExW, GetClassNameW, GetCursorPos, GetDlgItem, GetMessageW,
-                GetSystemMetrics, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
+                CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
+                EnumChildWindows, EnumWindows, FindWindowExW, GetClassNameW, GetCursorPos, GetDlgItem,
+                GetMessageW, GetSystemMetrics, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
                 GetWindowThreadProcessId, IsWindow, IsWindowVisible, LoadCursorW, PostMessageW,
-                PostQuitMessage, RegisterClassW, SendMessageW, SetForegroundWindow,
-                SetLayeredWindowAttributes, SetWindowPos, SetWindowTextW, ShowWindow,
-                TranslateMessage, CREATESTRUCTW, CW_USEDEFAULT, ES_AUTOHSCROLL, ES_PASSWORD,
-                GWLP_USERDATA, HMENU, HWND_TOPMOST, IDC_ARROW, IDC_CROSS, LWA_COLORKEY, MSG,
-                SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
-                SWP_SHOWWINDOW, SW_RESTORE, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CHAR,
-                WM_COMMAND, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-                WM_NCCREATE, WM_PAINT, WM_RBUTTONUP, WNDCLASSW, WS_BORDER, WS_CHILD,
+                PostQuitMessage, PostThreadMessageW, RegisterClassW, SendMessageW, SetForegroundWindow,
+                SetLayeredWindowAttributes, SetWindowPos, SetWindowsHookExW, SetWindowTextW, ShowWindow,
+                TranslateMessage, UnhookWindowsHookEx, CREATESTRUCTW, CW_USEDEFAULT, ES_AUTOHSCROLL,
+                ES_PASSWORD, GWLP_USERDATA, HHOOK, HMENU, HWND_TOPMOST, IDC_ARROW, IDC_CROSS,
+                KBDLLHOOKSTRUCT, LWA_COLORKEY, MSG, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+                SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_SHOWWINDOW, SW_RESTORE, SW_SHOW,
+                WH_KEYBOARD_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CHAR, WM_COMMAND, WM_DESTROY,
+                WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT,
+                WM_QUIT, WM_RBUTTONUP, WM_SYSKEYDOWN, WNDCLASSW, WS_BORDER, WS_CHILD,
                 WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
             },
         },
@@ -86,6 +88,186 @@ static EMERGENCY_STOP: AtomicBool = AtomicBool::new(false);
 static REGISTER_DEMO_CLASS: Once = Once::new();
 static REGISTER_OVERLAY_CLASS: Once = Once::new();
 static DEMO_WINDOW: Mutex<Option<isize>> = Mutex::new(None);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeAuthorizedSession {
+    pub session_id: String,
+    pub target_window_id: isize,
+    pub target_process_id: u32,
+    pub target_exe_path: Option<String>,
+    pub created_at: u64,
+    pub is_active: bool,
+}
+
+static ACTIVE_SESSION: Mutex<Option<NativeAuthorizedSession>> = Mutex::new(None);
+static GLOBAL_HOOK_THREAD: Mutex<Option<u32>> = Mutex::new(None);
+static GLOBAL_HOOK_HANDLE: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
+
+unsafe extern "system" fn global_keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if code >= 0 && (wparam.0 == WM_KEYDOWN as usize || wparam.0 == WM_SYSKEYDOWN as usize) {
+        let kbd = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
+        let vk = kbd.vkCode;
+
+        // 1. VK_PAUSE (Pause / Break key) - standalone dedicated emergency stop
+        // 2. Ctrl + Shift + Q (0x51) or Ctrl + Shift + Pause
+        // NOTE: Standard VK_ESCAPE by itself is NOT intercepted, preserving normal in-game behavior!
+        let ctrl_down = (GetKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0;
+        let shift_down = (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
+
+        let is_emergency_hotkey = vk == VK_PAUSE.0 as u32
+            || (ctrl_down && shift_down && (vk == 0x51 /* Q */ || vk == VK_PAUSE.0 as u32));
+
+        if is_emergency_hotkey {
+            emergency_stop();
+        }
+    }
+    CallNextHookEx(None, code, wparam, lparam)
+}
+
+pub fn start_global_emergency_hook() {
+    let mut thread_lock = match GLOBAL_HOOK_THREAD.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if thread_lock.is_some() {
+        return;
+    }
+
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    let _ = std::thread::spawn(move || {
+        unsafe {
+            let thread_id = GetCurrentThreadId();
+            let hook = SetWindowsHookExW(
+                WH_KEYBOARD_LL,
+                Some(global_keyboard_hook_proc),
+                None,
+                0,
+            );
+
+            if let Ok(h) = hook {
+                GLOBAL_HOOK_HANDLE.store(h.0 as *mut _, Ordering::SeqCst);
+                let _ = tx.send(Ok(thread_id));
+
+                let mut msg = MSG::default();
+                while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                    if msg.message == WM_QUIT {
+                        break;
+                    }
+                }
+
+                let _ = UnhookWindowsHookEx(h);
+                GLOBAL_HOOK_HANDLE.store(std::ptr::null_mut(), Ordering::SeqCst);
+            } else {
+                let _ = tx.send(Err("Failed to install global keyboard hook".to_string()));
+            }
+        }
+    });
+
+    if let Ok(Ok(tid)) = rx.recv() {
+        *thread_lock = Some(tid);
+    }
+}
+
+pub fn stop_global_emergency_hook() {
+    let mut thread_lock = match GLOBAL_HOOK_THREAD.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if let Some(tid) = thread_lock.take() {
+        unsafe {
+            let hook_ptr = GLOBAL_HOOK_HANDLE.load(Ordering::SeqCst);
+            if !hook_ptr.is_null() {
+                let _ = UnhookWindowsHookEx(HHOOK(hook_ptr));
+                GLOBAL_HOOK_HANDLE.store(std::ptr::null_mut(), Ordering::SeqCst);
+            }
+            let _ = PostThreadMessageW(tid, WM_QUIT, WPARAM(0), LPARAM(0));
+        }
+    }
+}
+
+pub fn authorize_session(
+    target_window_id: isize,
+    target_exe_path: Option<String>,
+) -> Result<NativeAuthorizedSession, String> {
+    let mut pid = 0;
+    if target_window_id > 0 {
+        let hwnd = HWND(target_window_id as *mut _);
+        unsafe {
+            if !IsWindow(Some(hwnd)).as_bool() || !IsWindowVisible(hwnd).as_bool() {
+                return Err("Target window is not valid or not visible; cannot authorize session".into());
+            }
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            if pid == 0 {
+                return Err("Failed to obtain process ID for target window".into());
+            }
+            if pid == std::process::id() && class_of(hwnd) != "MimicAutomationDemoTarget" {
+                return Err("Cannot authorize MIMIC's own window for automation".into());
+            }
+        }
+    }
+
+    let actual_exe = if pid > 0 {
+        unsafe { get_process_path(pid) }
+    } else {
+        target_exe_path.clone()
+    };
+
+    let session = NativeAuthorizedSession {
+        session_id: format!(
+            "session_{}_{}",
+            pid,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        ),
+        target_window_id,
+        target_process_id: pid,
+        target_exe_path: actual_exe.or(target_exe_path),
+        created_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+        is_active: true,
+    };
+
+    let mut lock = match ACTIVE_SESSION.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    *lock = Some(session.clone());
+
+    start_global_emergency_hook();
+    Ok(session)
+}
+
+pub fn update_session_target(target_window_id: isize, process_id: u32) {
+    if let Ok(mut lock) = ACTIVE_SESSION.lock() {
+        if let Some(session) = lock.as_mut() {
+            session.target_window_id = target_window_id;
+            session.target_process_id = process_id;
+            if session.target_exe_path.is_none() || session.target_exe_path.as_deref() == Some("DEMO") {
+                session.target_exe_path = unsafe { get_process_path(process_id) };
+            }
+        }
+    }
+}
+
+pub fn revoke_session() {
+    stop_global_emergency_hook();
+    if let Ok(mut lock) = ACTIVE_SESSION.lock() {
+        if let Some(session) = lock.as_mut() {
+            session.is_active = false;
+        }
+        *lock = None;
+    }
+}
+
+pub fn get_active_session() -> Option<NativeAuthorizedSession> {
+    ACTIVE_SESSION.lock().ok()?.clone()
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1815,29 +1997,51 @@ pub fn advance_demo(
 // -----------------------------------------------------------------------------
 
 unsafe fn verify_window_identity(hwnd: HWND, step: &StepExecutionPayload) -> Result<u32, String> {
-    // 1. Strict Permission Check: must be explicitly true
+    // 1. Strict Native Authorization Session Check
+    let session = {
+        let lock = match ACTIVE_SESSION.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        lock.clone().ok_or_else(|| {
+            "No active native authorization session found. Execution rejected by native security policy.".to_string()
+        })?
+    };
+
+    if !session.is_active {
+        return Err("Native authorization session is inactive or revoked".into());
+    }
+
+    // 2. Strict Permission Check: must be explicitly true
     if !step.permission_granted.unwrap_or(false) {
         return Err("Automation permission is false or missing; action cancelled by security policy".into());
     }
 
-    // 2. Window Existence and Visibility Check
+    // 3. Window Existence and Visibility Check
     if !IsWindow(Some(hwnd)).as_bool() || !IsWindowVisible(hwnd).as_bool() {
         return Err("Target window is no longer open or visible; failing closed".into());
     }
 
-    // 3. Process ID Extraction
+    // 4. Process ID Extraction
     let mut pid = 0;
     GetWindowThreadProcessId(hwnd, Some(&mut pid));
     if pid == 0 {
         return Err("Target window process could not be identified".into());
     }
 
-    // 4. Protection: Never automate MIMIC's own UI window
+    // 5. Protection: Never automate MIMIC's own UI window
     if pid == std::process::id() && class_of(hwnd) != "MimicAutomationDemoTarget" {
         return Err("Target window belongs to MIMIC itself; automation blocked for safety".into());
     }
 
-    // 5. Authorized PID Matching
+    // 6. Native Session & Authorized PID Matching
+    if session.target_process_id > 0 && pid != session.target_process_id {
+        return Err(format!(
+            "Target window PID {} does not match native authorized session PID {}",
+            pid, session.target_process_id
+        ));
+    }
+
     if let Some(expected_pid) = step.target_process_id {
         if expected_pid > 0 && pid != expected_pid {
             return Err(format!(
@@ -1847,22 +2051,8 @@ unsafe fn verify_window_identity(hwnd: HWND, step: &StepExecutionPayload) -> Res
         }
     }
 
-    // 6. Authorized Window Title Matching
-    if let Some(expected_title) = &step.target_window_title {
-        let trimmed_title = expected_title.trim();
-        if !trimmed_title.is_empty() {
-            let cur_title = title_of(hwnd);
-            if !cur_title.to_lowercase().contains(&trimmed_title.to_lowercase()) {
-                return Err(format!(
-                    "Target window title '{}' does not match authorized title filter '{}'",
-                    cur_title, trimmed_title
-                ));
-            }
-        }
-    }
-
     // 7. Authorized Executable Path Matching (Full Path / Binary Identity)
-    if let Some(expected_exe) = &step.target_exe_path {
+    if let Some(expected_exe) = step.target_exe_path.as_ref().or(session.target_exe_path.as_ref()) {
         let trimmed_exe = expected_exe.trim();
         if !trimmed_exe.is_empty() && !trimmed_exe.eq_ignore_ascii_case("DEMO") {
             let actual_exe = get_process_path(pid)
@@ -1873,20 +2063,11 @@ unsafe fn verify_window_identity(hwnd: HWND, step: &StepExecutionPayload) -> Res
                 let norm_actual = actual_exe.replace('/', "\\").to_lowercase();
                 let norm_expected = trimmed_exe.replace('/', "\\").to_lowercase();
                 if norm_actual != norm_expected {
-                    let actual_name = std::path::Path::new(&actual_exe)
-                        .file_name()
-                        .and_then(|f| f.to_str())
-                        .unwrap_or(&actual_exe);
-                    let expected_name = std::path::Path::new(trimmed_exe)
-                        .file_name()
-                        .and_then(|f| f.to_str())
-                        .unwrap_or(trimmed_exe);
-                    if !actual_name.eq_ignore_ascii_case(expected_name) {
-                        return Err(format!(
-                            "Process executable path '{}' does not match authorized path '{}'; failing closed",
-                            actual_exe, trimmed_exe
-                        ));
-                    }
+                    // Strict: NEVER fallback to filename when full path was supplied!
+                    return Err(format!(
+                        "Process executable path '{}' does not match authorized path '{}'; failing closed",
+                        actual_exe, trimmed_exe
+                    ));
                 }
             } else {
                 let actual_name = std::path::Path::new(&actual_exe)
@@ -2103,6 +2284,18 @@ pub fn execute_step(
         return match new_hwnd {
             Some(h) => {
                 let _ = unsafe { SetForegroundWindow(h) };
+                let mut session_updated = false;
+                if let Ok(mut lock) = ACTIVE_SESSION.lock() {
+                    if let Some(session) = lock.as_mut() {
+                        session.target_window_id = h.0 as isize;
+                        session.target_process_id = pid;
+                        session.is_active = true;
+                        session_updated = true;
+                    }
+                }
+                if !session_updated {
+                    let _ = authorize_session(h.0 as isize, Some(exe_path.to_string()));
+                }
                 Ok(StepExecutionResult {
                     success: true,
                     status: "verified".into(),
@@ -2560,6 +2753,12 @@ pub fn execute_step(
 
 pub fn emergency_stop() -> DemoRunResult {
     EMERGENCY_STOP.store(true, Ordering::SeqCst);
+    if let Ok(mut lock) = ACTIVE_SESSION.lock() {
+        if let Some(session) = lock.as_mut() {
+            session.is_active = false;
+        }
+    }
+    stop_global_emergency_hook();
     DemoRunResult {
         status: "stopped".into(),
         message: "Emergency stop requested. All automation actions halted immediately.".into(),
@@ -2733,6 +2932,7 @@ mod tests {
     #[test]
     fn test_prevent_duplicate_clicks_and_reliable_input() {
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_emergency_stop();
         start_demo().expect("demo target should open");
         thread::sleep(Duration::from_millis(200));
         let demo = list_windows()
@@ -2740,6 +2940,8 @@ mod tests {
             .into_iter()
             .find(|window| window.is_demo)
             .expect("demo login window should be discoverable");
+
+        let _session = authorize_session(demo.id, Some("DEMO".into())).expect("authorize session");
 
         let hwnd = HWND(demo.id as *mut _);
         unsafe {
@@ -2841,6 +3043,7 @@ mod tests {
     #[test]
     fn test_phase_1_hardening_scenarios() {
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_emergency_stop();
         start_demo().expect("demo target should open");
         thread::sleep(Duration::from_millis(200));
         let demo = list_windows()
@@ -2848,6 +3051,8 @@ mod tests {
             .into_iter()
             .find(|window| window.is_demo)
             .expect("demo login window should be discoverable");
+
+        let _session = authorize_session(demo.id, Some("DEMO".into())).expect("authorize session");
 
         let hwnd = HWND(demo.id as *mut _);
         unsafe {
@@ -3141,6 +3346,7 @@ mod tests {
     #[test]
     fn test_click_without_locator_fails_closed() {
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_emergency_stop();
         start_demo().expect("demo target should open");
         thread::sleep(Duration::from_millis(200));
         let demo = list_windows()
@@ -3148,10 +3354,12 @@ mod tests {
             .into_iter()
             .find(|window| window.is_demo)
             .expect("demo window should be found");
+        let _session = authorize_session(demo.id, Some("DEMO".into())).expect("authorize session");
         let hwnd = HWND(demo.id as *mut _);
         unsafe {
             reset_demo_window(hwnd);
         }
+        let _session = authorize_session(demo.id, Some("DEMO".into())).expect("authorize session");
 
         // Click with NO locator at all
         let no_loc_step = StepExecutionPayload {
@@ -3476,6 +3684,7 @@ mod tests {
             .into_iter()
             .find(|window| window.is_demo)
             .expect("demo window should be found");
+        let _session = authorize_session(demo.id, Some("DEMO".into())).expect("authorize session");
 
         // Spawn a background thread that triggers emergency stop after 100ms
         thread::spawn(|| {
@@ -3529,6 +3738,7 @@ mod tests {
     #[test]
     fn test_process_path_mismatch_fails_closed() {
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_emergency_stop();
         start_demo().expect("demo target should open");
         thread::sleep(Duration::from_millis(100));
         let demo = list_windows()
@@ -3536,6 +3746,7 @@ mod tests {
             .into_iter()
             .find(|window| window.is_demo)
             .expect("demo window should be found");
+        let _session = authorize_session(demo.id, Some("DEMO".into())).expect("authorize session");
 
         let mismatch_exe_step = StepExecutionPayload {
             id: Some("mismatch-1".into()),
@@ -3559,6 +3770,34 @@ mod tests {
         let res = execute_step(demo.id, mismatch_exe_step);
         assert!(res.is_err(), "Must fail closed if executable path does not match authorized binary");
         assert!(res.unwrap_err().contains("does not match authorized"));
+
+        // 2. Strict Full Path: Same filename in different directory must NOT match or fall back
+        let actual_exe = unsafe { get_process_path(std::process::id()) }.unwrap_or_default();
+        let filename = std::path::Path::new(&actual_exe)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("test.exe");
+        let fake_path_step = StepExecutionPayload {
+            id: Some("mismatch-2".into()),
+            title: "Same Filename Different Path".into(),
+            kind: "verify-state".into(),
+            action_type: Some("verify-state".into()),
+            locator: None,
+            text: None,
+            secret_ref: None,
+            key: None,
+            expected_state: Some("login".into()),
+            expected_locator: None,
+            timeout_ms: Some(1000),
+            max_attempts: Some(1),
+            permission_granted: Some(true),
+            target_process_id: None,
+            target_exe_path: Some(format!("C:\\SpoofedPath\\{filename}")),
+            target_window_title: None,
+        };
+        let res2 = execute_step(demo.id, fake_path_step);
+        assert!(res2.is_err(), "Must reject even if filename matches when full path differs");
+        assert!(res2.unwrap_err().contains("does not match authorized path"));
     }
 
     #[test]
@@ -3577,6 +3816,7 @@ mod tests {
         unsafe {
             reset_demo_window(hwnd);
         }
+        let _session = authorize_session(demo.id, Some("DEMO".into())).expect("authorize session");
 
         // 1. Store secret in Windows Credential Manager
         let vault_target = "mimic_phase2_test_user";

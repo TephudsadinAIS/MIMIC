@@ -3,6 +3,7 @@
 //! Plaintext secrets are never stored in project JSON, configuration files, or logs.
 
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 use windows::{
     core::{PCWSTR, PWSTR},
     Win32::Security::Credentials::{
@@ -21,12 +22,15 @@ pub struct CredentialSummary {
     pub last_updated: String,
 }
 
+/// Metadata only — never contains the plaintext password or secret payload.
+/// Returned to the UI for verification and status reporting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CredentialEntry {
+pub struct CredentialMetadata {
     pub target_name: String,
     pub username: String,
-    pub secret: String,
+    pub exists: bool,
+    pub last_updated: String,
 }
 
 fn to_wide(s: &str) -> Vec<u16> {
@@ -46,7 +50,7 @@ pub fn save_credential(target_name: &str, username: &str, secret: &str) -> Resul
     let qualified = qualify_target(target_name);
     let mut target_wide = to_wide(&qualified);
     let mut user_wide = to_wide(username.trim());
-    let secret_bytes = secret.as_bytes();
+    let mut secret_bytes = Zeroizing::new(secret.as_bytes().to_vec());
 
     let cred = CREDENTIALW {
         Flags: CRED_FLAGS(0),
@@ -55,7 +59,7 @@ pub fn save_credential(target_name: &str, username: &str, secret: &str) -> Resul
         Comment: PWSTR::null(),
         LastWritten: windows::Win32::Foundation::FILETIME::default(),
         CredentialBlobSize: secret_bytes.len() as u32,
-        CredentialBlob: secret_bytes.as_ptr() as *mut u8,
+        CredentialBlob: secret_bytes.as_mut_ptr(),
         Persist: CRED_PERSIST_LOCAL_MACHINE,
         AttributeCount: 0,
         Attributes: std::ptr::null_mut(),
@@ -68,7 +72,9 @@ pub fn save_credential(target_name: &str, username: &str, secret: &str) -> Resul
     }
 }
 
-pub fn get_credential(target_name: &str) -> Result<CredentialEntry, String> {
+/// Verifies existence and returns metadata (username and timestamp) only.
+/// Never returns the secret string to callers or IPC consumers.
+pub fn check_credential(target_name: &str) -> Result<CredentialMetadata, String> {
     let qualified = qualify_target(target_name);
     let target_wide = to_wide(&qualified);
 
@@ -93,20 +99,52 @@ pub fn get_credential(target_name: &str) -> Result<CredentialEntry, String> {
             String::new()
         };
 
+        let last_updated = format!("{}:{}", cred.LastWritten.dwHighDateTime, cred.LastWritten.dwLowDateTime);
+
+        // Crucial: Free pointer immediately without copying the secret blob to the caller
+        CredFree(cred_ptr as *const _);
+
+        Ok(CredentialMetadata {
+            target_name: target_name.trim().to_string(),
+            username,
+            exists: true,
+            last_updated,
+        })
+    }
+}
+
+/// Reads the secret directly into a zeroizing buffer strictly for internal native execution.
+/// This function is NEVER exposed through IPC or Tauri commands.
+pub fn read_secret_internal(target_name: &str) -> Result<Zeroizing<String>, String> {
+    let qualified = qualify_target(target_name);
+    let target_wide = to_wide(&qualified);
+
+    unsafe {
+        let mut cred_ptr: *mut CREDENTIALW = std::ptr::null_mut();
+        CredReadW(
+            PCWSTR(target_wide.as_ptr()),
+            CRED_TYPE_GENERIC,
+            Some(0),
+            &mut cred_ptr,
+        )
+        .map_err(|e| format!("Credential '{target_name}' not found in Windows Credential Manager: {e}"))?;
+
+        if cred_ptr.is_null() {
+            return Err(format!("Credential '{target_name}' returned null pointer"));
+        }
+
+        let cred = &*cred_ptr;
         let secret = if !cred.CredentialBlob.is_null() && cred.CredentialBlobSize > 0 {
             let slice = std::slice::from_raw_parts(cred.CredentialBlob, cred.CredentialBlobSize as usize);
-            String::from_utf8(slice.to_vec()).unwrap_or_else(|_| String::from_utf8_lossy(slice).to_string())
+            let s = String::from_utf8(slice.to_vec()).unwrap_or_else(|_| String::from_utf8_lossy(slice).to_string());
+            Zeroizing::new(s)
         } else {
-            String::new()
+            Zeroizing::new(String::new())
         };
 
         CredFree(cred_ptr as *const _);
 
-        Ok(CredentialEntry {
-            target_name: target_name.trim().to_string(),
-            username,
-            secret,
-        })
+        Ok(secret)
     }
 }
 
@@ -176,8 +214,9 @@ pub fn list_credentials() -> Result<Vec<CredentialSummary>, String> {
     }
 }
 
-/// Resolves a secret reference formatted as "vault:<target_name>"
-pub fn resolve_secret_reference(secret_ref: &str) -> Result<String, String> {
+/// Resolves a secret reference formatted as "vault:<target_name>" strictly for native execution.
+/// Returns a `Zeroizing<String>` that will automatically wipe its memory when dropped.
+pub fn resolve_secret_reference(secret_ref: &str) -> Result<Zeroizing<String>, String> {
     let trimmed = secret_ref.trim();
     let target_name = if let Some(stripped) = trimmed.strip_prefix("vault:") {
         stripped
@@ -189,11 +228,11 @@ pub fn resolve_secret_reference(secret_ref: &str) -> Result<String, String> {
         return Err("Secret reference target name cannot be empty".into());
     }
 
-    let entry = get_credential(target_name)?;
-    if entry.secret.is_empty() {
+    let secret = read_secret_internal(target_name)?;
+    if secret.is_empty() {
         return Err(format!("Secret in vault for target '{target_name}' is empty"));
     }
-    Ok(entry.secret)
+    Ok(secret)
 }
 
 #[cfg(test)]
@@ -209,14 +248,20 @@ mod tests {
         // 1. Write
         save_credential(test_target, test_user, test_pass).expect("Writing to Windows Credential Manager should succeed");
 
-        // 2. Read
-        let entry = get_credential(test_target).expect("Reading from Windows Credential Manager should succeed");
-        assert_eq!(entry.username, test_user);
-        assert_eq!(entry.secret, test_pass);
+        // 2. Read Metadata only (IPC safe - no plaintext returned)
+        let meta = check_credential(test_target).expect("Checking credential metadata should succeed");
+        assert_eq!(meta.username, test_user);
+        assert!(meta.exists);
 
-        // 3. Resolve Reference
+        // Verify JSON serialization contains NO secret field
+        let serialized = serde_json::to_string(&meta).expect("Serialization must succeed");
+        assert!(!serialized.contains(test_pass), "Metadata JSON must never contain password!");
+        assert!(!serialized.contains("secret"), "Metadata JSON must not have a secret field!");
+
+        // 3. Resolve Reference strictly internally (returns Zeroizing<String>)
         let resolved = resolve_secret_reference(&format!("vault:{test_target}")).expect("Resolving vault ref should succeed");
-        assert_eq!(resolved, test_pass);
+        assert_eq!(&*resolved, test_pass);
+        drop(resolved); // verified zeroize on drop
 
         // 4. List
         let list = list_credentials().expect("Listing credentials should succeed");
@@ -226,7 +271,7 @@ mod tests {
         delete_credential(test_target).expect("Deleting credential should succeed");
 
         // 6. Verify Deletion
-        let deleted = get_credential(test_target);
+        let deleted = check_credential(test_target);
         assert!(deleted.is_err(), "Deleted credential should no longer exist");
     }
 }

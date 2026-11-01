@@ -6,10 +6,11 @@ export interface CredentialSummary {
   lastUpdated: string;
 }
 
-export interface CredentialEntry {
+export interface CredentialMetadata {
   targetName: string;
   username: string;
-  secret: string;
+  exists: boolean;
+  lastUpdated: string;
 }
 
 function isDesktop(): boolean {
@@ -18,25 +19,34 @@ function isDesktop(): boolean {
 
 export async function saveCredential(targetName: string, username: string, secret: string): Promise<void> {
   if (!isDesktop()) {
-    // In mock/web environment, store securely in memory or session
-    sessionStorage.setItem(`mimic_vault_${targetName}`, JSON.stringify({ targetName, username, secret }));
+    // In mock/preview environment, only store non-sensitive metadata.
+    // Plaintext secrets are strictly NEVER written to sessionStorage, localStorage, or cookies.
+    sessionStorage.setItem(
+      `mimic_vault_meta_${targetName}`,
+      JSON.stringify({
+        targetName,
+        username,
+        exists: true,
+        lastUpdated: new Date().toLocaleTimeString(),
+      }),
+    );
     return;
   }
   await invoke('credential_save', { targetName, username, secret });
 }
 
-export async function getCredential(targetName: string): Promise<CredentialEntry> {
+export async function checkCredential(targetName: string): Promise<CredentialMetadata> {
   if (!isDesktop()) {
-    const raw = sessionStorage.getItem(`mimic_vault_${targetName}`);
+    const raw = sessionStorage.getItem(`mimic_vault_meta_${targetName}`);
     if (!raw) throw new Error(`Credential '${targetName}' not found in mock vault`);
-    return JSON.parse(raw) as CredentialEntry;
+    return JSON.parse(raw) as CredentialMetadata;
   }
-  return await invoke<CredentialEntry>('credential_get', { targetName });
+  return await invoke<CredentialMetadata>('credential_check', { targetName });
 }
 
 export async function deleteCredential(targetName: string): Promise<void> {
   if (!isDesktop()) {
-    sessionStorage.removeItem(`mimic_vault_${targetName}`);
+    sessionStorage.removeItem(`mimic_vault_meta_${targetName}`);
     return;
   }
   await invoke('credential_delete', { targetName });
@@ -47,12 +57,12 @@ export async function listCredentials(): Promise<CredentialSummary[]> {
     const list: CredentialSummary[] = [];
     for (let i = 0; i < sessionStorage.length; i++) {
       const key = sessionStorage.key(i);
-      if (key?.startsWith('mimic_vault_')) {
-        const item = JSON.parse(sessionStorage.getItem(key) || '{}') as CredentialEntry;
+      if (key?.startsWith('mimic_vault_meta_')) {
+        const item = JSON.parse(sessionStorage.getItem(key) || '{}') as CredentialMetadata;
         list.push({
           targetName: item.targetName,
           username: item.username,
-          lastUpdated: new Date().toLocaleTimeString(),
+          lastUpdated: item.lastUpdated,
         });
       }
     }
